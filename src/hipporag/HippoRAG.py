@@ -512,12 +512,14 @@ class HippoRAG:
 
     def do_some_tests(self):
 
+        new_graph = self.graph.copy()
 
         print(f"mengyao_debug entity_embedding_store are {self.entity_embedding_store.get_all_id_to_rows()}")
         print(f"mengyao_debug fact_embedding_store are {self.fact_embedding_store.get_all_id_to_rows()}")
         print(f"mengyao_debug chunk_embedding_store are {self.chunk_embedding_store.get_all_id_to_rows()}")
+        print(f"""mengyao_debug self.graph.vs["name"] are {self.graph.vs["name"]}""")
 
-        vertices = self.graph.vs
+        vertices = new_graph.vs
         print("所有顶点:", vertices["name"])
 
         for vertex in vertices:
@@ -528,21 +530,74 @@ class HippoRAG:
             """
             incident() 获取与该顶点关联的所有边
             """
-            incident_edges = self.graph.incident(vertex_index)
+            incident_edges = new_graph.incident(vertex_index)
 
             print(f"\n顶点 {vertex_name} (索引 {vertex_index}) 连接的边:")
             for edge_index in incident_edges:
-                edge = self.graph.es[edge_index]
-                print(f"""边 edge is {edge.attribute_names()}""")
+                edge = new_graph.es[edge_index]
+                print(f"""边 edge is {edge.attribute_names()}, 这个边有以下属性：\n""")
+                for attr in edge.attribute_names():
+                    print(f""" 【{attr}】：【{new_graph.es[attr]}】""")
+
                 source_vertex = edge.source
                 target_vertex = edge.target
-                source_name = self.graph.vs[source_vertex]["name"]
-                target_name = self.graph.vs[target_vertex]["name"]
+                source_name = new_graph.vs[source_vertex]["name"]
+                target_name = new_graph.vs[target_vertex]["name"]
                 print(f"  边 {edge_index}: {source_name} -> {target_name}")
 
+        # 3. 遍历所有边，删除所有连接到chunk上面的边。
+        edges_to_remove = []
+
+        print("\n遍历所有边及其属性:")
+        for edge in new_graph.es:
+            # 获取边的所有属性
+            edge_attrs = edge.attributes()
+            # 检查权重是否为1
+            if "attributes" in edge_attrs and "contains" in edge_attrs["attributes"]:
+                edges_to_remove.append(edge.index)
+            else:
+                if "attributes" in edge_attrs:
+                    for attr in edge_attrs["attributes"]:
+                        if "[reverse]" in attr:
+                            edges_to_remove.append(edge.index)
+                            break
+
+        # 4. 删除标记的边（从后往前删除以避免索引问题）
+        edges_to_remove.sort(reverse=True)
+        for edge_index in edges_to_remove:
+            new_graph.delete_edges(edge_index)
+            print(f"已删除边索引 {edge_index}")
+
+
+        # 再删除chunk点，防止图太乱：
+        vertices_to_remove = []
+
+        for vertex in new_graph.vs:
+            vertex_label = vertex["name"]
+            # 检查标签是否包含"chunk"（不区分大小写）
+            if vertex_label is not None and "chunk" in vertex_label.lower():
+                vertices_to_remove.append(vertex.index)
+        # 4. 删除标记的顶点（从后往前删除以避免索引问题）
+        if vertices_to_remove:
+            # 按索引降序排序，这样从后往前删除不会影响前面的索引
+            vertices_to_remove.sort(reverse=True)
+
+            for vertex_index in vertices_to_remove:
+                new_graph.delete_vertices(vertex_index)
+                print(f"已删除顶点索引 {vertex_index}")
+        else:
+            print("\n没有找到标签包含'chunk'的顶点")
+
+
+        all_vertices_names = []
+        for name in new_graph.vs["name"]:
+            if "chunk" in name:
+                all_vertices_names.append(name)
+            else:
+                all_vertices_names.append(self.entity_embedding_store.get_all_id_to_rows()[name]["content"])
         ig.config["plotting.backend"] = "matplotlib"
         import matplotlib.pyplot as plt
-        ig.plot(self.graph,
+        ig.plot(new_graph,
              # 顶点大小和颜色
              vertex_size=20,  # 顶点大小
              vertex_color="lightblue",  # 顶点颜色
@@ -550,11 +605,13 @@ class HippoRAG:
              vertex_frame_width=1,  # 顶点边框宽度
 
              # 标签设置
-             vertex_label=self.graph.vs["name"],  # 顶点标签
+             vertex_label= all_vertices_names,
              vertex_label_size=12,  # 标签字体大小
              vertex_label_color="black",  # 标签颜色
              vertex_label_dist=1,  # 标签与顶点的距离
              vertex_label_family="sans-serif",  # 字体
+
+             edge_label=new_graph.es["attributes"],
 
              # 顶点形状
              vertex_shape="circle"  # 顶点形状：circle, square, triangle, etc.
@@ -908,15 +965,38 @@ class HippoRAG:
                     node_key = compute_mdhash_id(content=triple[0], prefix=("entity-"))
                     node_2_key = compute_mdhash_id(content=triple[2], prefix=("entity-"))
 
-                    self.node_to_node_stats[(node_key, node_2_key)] = self.node_to_node_stats.get(
-                        (node_key, node_2_key), 0.0) + 1
-                    self.node_to_node_stats[(node_2_key, node_key)] = self.node_to_node_stats.get(
-                        (node_2_key, node_key), 0.0) + 1
+                    # self.node_to_node_stats[(node_key, node_2_key)] = self.node_to_node_stats.get(
+                    #     (node_key, node_2_key), 0.0) + 1
+                    # self.node_to_node_stats[(node_2_key, node_key)] = self.node_to_node_stats.get(
+                    #     (node_2_key, node_key), 0.0) + 1
+
+                    old_stat = self.node_to_node_stats.get((node_key, node_2_key),
+                                                           {
+                                                               "weight": 0.0,
+                                                               "attributes": [],
+                                                               "chunks": [],
+                                                           })
+                    old_stat["weight"] += 1
+                    old_stat["attributes"].append(triple[1])
+                    old_stat["chunks"].append(chunk_key)
+                    self.node_to_node_stats[(node_key, node_2_key)] = old_stat
+
+                    old_stat = self.node_to_node_stats.get((node_2_key, node_key),
+                                                           {
+                                                               "weight": 0.0,
+                                                               "attributes": [],
+                                                               "chunks": [],
+                                                           })
+                    old_stat["weight"] += 1
+                    old_stat["attributes"].append(f"{triple[1]} [reverse]")
+                    old_stat["chunks"].append(chunk_key)
+                    self.node_to_node_stats[(node_2_key, node_key)] = old_stat
 
                     entities_in_chunk.add(node_key)
                     entities_in_chunk.add(node_2_key)
 
                 for node in entities_in_chunk:
+                    ## entities -> chunks
                     self.ent_node_to_chunk_ids[node] = self.ent_node_to_chunk_ids.get(node, set()).union(set([chunk_key]))
 
 
@@ -970,7 +1050,11 @@ class HippoRAG:
                 for chunk_ent in chunk_triple_entities[idx]:
                     node_key = compute_mdhash_id(chunk_ent, prefix="entity-")
 
-                    self.node_to_node_stats[(chunk_key, node_key)] = 1.0
+                    self.node_to_node_stats[(chunk_key, node_key)] = {
+                        "weight": 1,
+                        "attributes": ["contains"],
+                        "chunks": [chunk_key],
+                    }
 
                 num_new_chunks += 1
 
@@ -1039,7 +1123,7 @@ class HippoRAG:
                                                     key_batch_size=self.global_config.synonymy_edge_key_batch_size)
 
 
-        print(f"mengyao_debug query_node_key2knn_node_keys is {query_node_key2knn_node_keys}")
+        # print(f"mengyao_debug query_node_key2knn_node_keys is {query_node_key2knn_node_keys}")
         num_synonym_triple = 0
         synonym_candidates = []  # [(node key, [(synonym node key, corresponding score), ...]), ...]
 
@@ -1055,18 +1139,26 @@ class HippoRAG:
                 nns = query_node_key2knn_node_keys[node_key]
 
                 num_nns = 0
+                ## nn 是同义词 entity， score是相似分数
                 for nn, score in zip(nns[0], nns[1]):
                     if score < self.global_config.synonymy_edge_sim_threshold or num_nns > 100:
                         break
 
                     nn_phrase = self.entity_id_to_row[nn]["content"]
+                    print(f"mengyao_debug nn_phrase is {nn_phrase}")
 
                     if nn != node_key and nn_phrase != '':
                         sim_edge = (node_key, nn)
                         synonyms.append((nn, score))
                         num_synonym_triple += 1
 
-                        self.node_to_node_stats[sim_edge] = score  # Need to seriously discuss on this
+                        print(f"mengyao_debug sim_edge is {sim_edge}")
+                        # self.node_to_node_stats[sim_edge] = score  # Need to seriously discuss on this
+                        self.node_to_node_stats[sim_edge] = {
+                            "weight": score,
+                            "attributes": "synonymy",
+                            "chunk": "synonymy",
+                        }
                         num_nns += 1
 
             synonym_candidates.append((node_key, synonyms))
@@ -1255,20 +1347,22 @@ class HippoRAG:
         edge_target_node_keys = []
         edge_metadata = []
         print(f"mengyao_debug self.node_to_node_stats is {self.node_to_node_stats}")
-        for edge, weight in self.node_to_node_stats.items():
+        for edge, attributes in self.node_to_node_stats.items():
             if edge[0] == edge[1]:
                 continue
-            graph_adj_list[edge[0]][edge[1]] = weight
-            graph_inverse_adj_list[edge[1]][edge[0]] = weight
+            # print(f"mengyao_debug attributes is {}")
+            graph_adj_list[edge[0]][edge[1]] = attributes["weight"]
+            graph_inverse_adj_list[edge[1]][edge[0]] = attributes["weight"]
 
             edge_source_node_keys.append(edge[0])
             edge_target_node_keys.append(edge[1])
-            edge_metadata.append({
-                "weight": weight,
-                "verb": "verb_demo",
-            })
+            edge_metadata.append(attributes)
 
-        valid_edges, valid_weights = [], {"weight": [], "verbs": []}
+        valid_edges, valid_attributes = [], {
+            "weight": [],
+            "attributes": [],
+            "chunks": [],
+        }
         current_node_ids = set(self.graph.vs["name"])
         print(f"mengyao_debug current_node_ids is {current_node_ids}")
         print(f"mengyao_debug edge_source_node_keys is {edge_source_node_keys}")
@@ -1278,18 +1372,19 @@ class HippoRAG:
             if source_node_id in current_node_ids and target_node_id in current_node_ids:
                 valid_edges.append((source_node_id, target_node_id))
                 weight = edge_d.get("weight", 1.0)
-                verb = edge_d.get("verb", "v2")
-                valid_weights["weight"].append(weight)
-                valid_weights["verbs"].append(verb)
+                attributes = edge_d.get("attributes", [])
+                chunks = edge_d.get("chunks", [])
+                valid_attributes["weight"].append(weight)
+                valid_attributes["attributes"].append(attributes)
+                valid_attributes["chunks"].append(chunks)
             else:
                 logger.warning(f"Edge {source_node_id} -> {target_node_id} is not valid.")
 
         print(f"mengyao_debug valid_edges are {valid_edges}")
-        print(f"mengyao_debug valid_weights are {valid_weights}")
-        print(f"mengyao_debug graph add valid edges {valid_edges}, attributes {valid_weights}")
+        print(f"mengyao_debug valid_attributes are {valid_attributes}")
         res = self.graph.add_edges(
             valid_edges,
-            attributes=valid_weights
+            attributes=valid_attributes
         )
         print(f"mengyao_debug add graph edges res is {res}")
 

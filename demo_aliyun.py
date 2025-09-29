@@ -14,16 +14,16 @@ def main():
     docs = [
         "Oliver Badman is a politician.",
         "Oliver Badman becomes a politician.",
-        # "George Rankin is a politician.",
-        # "Thomas Marwick is a politician.",
-        # "Cinderella attended the royal ball.",
-        # "The prince used the lost glass slipper to search the kingdom.",
-        # "When the slipper fit perfectly, Cinderella was reunited with the prince.",
-        # "Erik Hort's birthplace is Montebello.",
-        # "Marina is bom in Minsk.",
-        # "Montebello is a part of Rockland County.",
-        # "Erik Hort's is a football player" ##mengyao_debug I added this.
-        # "Lebron is a basketball player"  ##mengyao_debug I added this.
+        "George Rankin is a politician.",
+        "Thomas Marwick is a politician.",
+        "Cinderella attended the royal ball.",
+        "The prince used the lost glass slipper to search the kingdom.",
+        "When the slipper fit perfectly, Cinderella was reunited with the prince.",
+        "Erik Hort's birthplace is Montebello.",
+        "Marina is bom in Minsk.",
+        "Montebello is a part of Rockland County.",
+        "Erik Hort's is a football player" ##mengyao_debug I added this.
+        "Lebron is a basketball player"  ##mengyao_debug I added this.
     ]
 
     save_dir = 'outputs/aliyun'  # Define save directory for HippoRAG objects (each LLM/Embedding model combination will create a new subdirectory)
@@ -38,10 +38,11 @@ def main():
                         embedding_model_name=embedding_model_name,
                         embedding_base_url=aliyun_url)
 
-    # hipporag.do_some_tests();return
 
     # Run indexing
     hipporag.index(docs=docs)
+
+    hipporag.do_some_tests()
 
     # Separate Retrieval & QA
     queries = [
