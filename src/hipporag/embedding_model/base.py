@@ -218,32 +218,32 @@ class BaseEmbeddingModel:
         return np.dot(query_vec, doc_vecs.T)
     
 
+if __name__ == "__main__":
+    class EmbeddingCache:
+        """A multiprocessing-safe global cache for storing embeddings."""
 
-class EmbeddingCache:
-    """A multiprocessing-safe global cache for storing embeddings."""
-    
-    _manager = multiprocessing.Manager()
-    _cache = _manager.dict()  # Shared dictionary for multiprocessing
-    _lock = threading.Lock()  # Thread-safe lock for concurrent access
+        _manager = multiprocessing.Manager()
+        _cache = _manager.dict()  # Shared dictionary for multiprocessing
+        _lock = threading.Lock()  # Thread-safe lock for concurrent access
 
-    @classmethod
-    def get(cls, content):
-        """Retrieve the embedding if cached."""
-        return cls._cache.get(content)
+        @classmethod
+        def get(cls, content):
+            """Retrieve the embedding if cached."""
+            return cls._cache.get(content)
 
-    @classmethod
-    def set(cls, content, embedding):
-        """Store an embedding in the cache."""
-        with cls._lock:  # Ensures thread safety
-            cls._cache[content] = embedding
+        @classmethod
+        def set(cls, content, embedding):
+            """Store an embedding in the cache."""
+            with cls._lock:  # Ensures thread safety
+                cls._cache[content] = embedding
 
-    @classmethod
-    def contains(cls, content):
-        """Check if the embedding exists in cache."""
-        return content in cls._cache
+        @classmethod
+        def contains(cls, content):
+            """Check if the embedding exists in cache."""
+            return content in cls._cache
 
-    @classmethod
-    def clear(cls):
-        """Clear the entire cache."""
-        with cls._lock:
-            cls._cache.clear()
+        @classmethod
+        def clear(cls):
+            """Clear the entire cache."""
+            with cls._lock:
+                cls._cache.clear()

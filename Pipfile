@@ -1,0 +1,29 @@
+[[source]]
+url = "https://pypi.org/simple"
+verify_ssl = true
+name = "pypi"
+
+[packages]
+openai = "==1.91.1"
+litellm = "==1.73.1"
+vllm = "==0.6.6.post1"
+gritlm = "==1.0.2"
+torch = "==2.5.1"
+transformers = "==4.45.2"
+networkx = "==3.4.2"
+pydantic = "==2.10.4"
+python-igraph = "==0.11.8"
+tenacity = "==8.5.0"
+tiktoken = "==0.7.0"
+nest-asyncio = "*"
+numpy = "*"
+scipy = "*"
+tqdm = "*"
+einops = "*"
+boto3 = "*"
+
+[dev-packages]
+
+[requires]
+python_version = "3.10"
+python_full_version = "3.10.10"

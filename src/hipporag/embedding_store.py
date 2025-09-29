@@ -60,12 +60,18 @@ class EmbeddingStore:
 
         return {h: {"hash_id": h, "content": t} for h, t in zip(missing_ids, texts_to_encode)}
 
+    """
+    这里就是把text做hash，然后upsert
+    存储在本地向量数据库
+    """
     def insert_strings(self, texts: List[str]):
+        print(f"mengyao_debug insert_strings texts is {texts}")
         nodes_dict = {}
 
         for text in texts:
             nodes_dict[compute_mdhash_id(text, prefix=self.namespace + "-")] = {'content': text}
 
+        print(f"nodes_dict is {nodes_dict}")
         # Get all hash_ids from the input dictionary.
         all_hash_ids = list(nodes_dict.keys())
         if not all_hash_ids:
@@ -76,7 +82,7 @@ class EmbeddingStore:
         # Filter out the missing hash_ids.
         missing_ids = [hash_id for hash_id in all_hash_ids if hash_id not in existing]
 
-        logger.info(
+        print(
             f"Inserting {len(missing_ids)} new records, {len(all_hash_ids) - len(missing_ids)} records already exist.")
 
         if not missing_ids:
@@ -84,6 +90,11 @@ class EmbeddingStore:
 
         # Prepare the texts to encode from the "content" field.
         texts_to_encode = [nodes_dict[hash_id]["content"] for hash_id in missing_ids]
+        """
+        mengyao_debug texts_to_encode is ["Erik Hort's is a football player"], 
+        missing_ids is ['chunk-665eba1d3aac5338ae36cadb8a7fd6df']
+        """
+        print(f"mengyao_debug texts_to_encode is {texts_to_encode}, missing_ids is {missing_ids}")
 
         missing_embeddings = self.embedding_model.batch_encode(texts_to_encode)
 

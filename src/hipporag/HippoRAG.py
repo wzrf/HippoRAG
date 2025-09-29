@@ -10,7 +10,7 @@ from collections import defaultdict
 from transformers import HfArgumentParser
 from concurrent.futures import ThreadPoolExecutor
 from tqdm import tqdm
-from igraph import Graph
+from igraph import Graph, plot as GraphPlot
 import igraph as ig
 import numpy as np
 from collections import defaultdict
@@ -83,6 +83,7 @@ class HippoRAG:
             embedding_model_name: Embedding model name, can be inserted directly as well as through configuration file.
             llm_base_url: LLM URL for a deployed LLM model, can be inserted directly as well as through configuration file.
         """
+
         if global_config is None:
             self.global_config = BaseConfig()
         else:
@@ -111,7 +112,7 @@ class HippoRAG:
             self.global_config.azure_embedding_endpoint = azure_embedding_endpoint
 
         _print_config = ",\n  ".join([f"{k} = {v}" for k, v in asdict(self.global_config).items()])
-        logger.debug(f"HippoRAG init with config:\n  {_print_config}\n")
+        logger.info(f"HippoRAG init with config:\n  {_print_config}\n")
 
         #LLM and embedding model specific working directories are created under every specified saving directories
         llm_label = self.global_config.llm_name.replace("/", "_")
@@ -131,6 +132,9 @@ class HippoRAG:
         elif self.global_config.openie_mode ==  'Transformers-offline':
             self.openie = TransformersOfflineOpenIE(self.global_config)
 
+        """
+        从本地缓存初始化一个graph
+        """
         self.graph = self.initialize_graph()
 
         if self.global_config.openie_mode == 'offline':
@@ -139,9 +143,11 @@ class HippoRAG:
             self.embedding_model: BaseEmbeddingModel = _get_embedding_model_class(
                 embedding_model_name=self.global_config.embedding_model_name)(global_config=self.global_config,
                                                                               embedding_model_name=self.global_config.embedding_model_name)
+        ## chunk 向量存储
         self.chunk_embedding_store = EmbeddingStore(self.embedding_model,
                                                     os.path.join(self.working_dir, "chunk_embeddings"),
                                                     self.global_config.embedding_batch_size, 'chunk')
+        ## entity 向量存储
         self.entity_embedding_store = EmbeddingStore(self.embedding_model,
                                                      os.path.join(self.working_dir, "entity_embeddings"),
                                                      self.global_config.embedding_batch_size, 'entity')
@@ -207,6 +213,7 @@ class HippoRAG:
         new_openie_rows = {k : chunks[k] for k in chunk_keys_to_process}
 
         if len(chunk_keys_to_process) > 0:
+            print(f"mengyao_debug doing batch_openie\n")
             new_ner_results_dict, new_triple_results_dict = self.openie.batch_openie(new_openie_rows)
             self.merge_openie_results(all_openie_info, new_openie_rows, new_ner_results_dict, new_triple_results_dict)
 
@@ -229,22 +236,40 @@ class HippoRAG:
 
         logger.info(f"Performing OpenIE")
 
+        ## offline 实现open IE
         if self.global_config.openie_mode == 'offline':
+            print(f"using offline")
             self.pre_openie(docs)
 
+        """
+        docs：原始文本
+        """
+
         self.chunk_embedding_store.insert_strings(docs)
+        """
+        hash_id -> text
+        """
         chunk_to_rows = self.chunk_embedding_store.get_all_id_to_rows()
 
         all_openie_info, chunk_keys_to_process = self.load_existing_openie(chunk_to_rows.keys())
         new_openie_rows = {k : chunk_to_rows[k] for k in chunk_keys_to_process}
 
+        ### 查询 triplets
         if len(chunk_keys_to_process) > 0:
+            """
+            mengyao_debug new_openie_rows is 
+            {'chunk-665eba1d3aac5338ae36cadb8a7fd6df': 
+            {'hash_id': 'chunk-665eba1d3aac5338ae36cadb8a7fd6df', 'content': "Erik Hort's is a football player"}
+            }
+            """
+            print(f"mengyao_debug new_openie_rows is {new_openie_rows}")
             new_ner_results_dict, new_triple_results_dict = self.openie.batch_openie(new_openie_rows)
             self.merge_openie_results(all_openie_info, new_openie_rows, new_ner_results_dict, new_triple_results_dict)
 
         if self.global_config.save_openie:
             self.save_openie_results(all_openie_info)
 
+        print(f"mengyao_debug all_openie_info is {all_openie_info}")
         ner_results_dict, triple_results_dict = reformat_openie_results(all_openie_info)
 
         assert len(chunk_to_rows) == len(ner_results_dict) == len(triple_results_dict), f"len(chunk_to_rows): {len(chunk_to_rows)}, len(ner_results_dict): {len(ner_results_dict)}, len(triple_results_dict): {len(triple_results_dict)}"
@@ -257,9 +282,24 @@ class HippoRAG:
         facts = flatten_facts(chunk_triples)
 
         logger.info(f"Encoding Entities")
+        """
+        ['cinderella', 'erik hort', 'football player', 'george rankin', 'marina', 
+        'minsk', 'montebello', 'oliver badman', 'politician', 'prince', 'rockland county', 
+        'royal ball', 'slipper', 'the kingdom', 'the lost glass slipper', 'the prince', 'thomas marwick']
+        """
         self.entity_embedding_store.insert_strings(entity_nodes)
 
         logger.info(f"Encoding Facts")
+        """
+        facts:
+        ["('erik hort', 'is a', 'football player')", "('oliver badman', 'is a', 'politician')", 
+        "('slipper', 'fit perfectly', 'cinderella')", "('erik hort', 'birthplace', 'montebello')", 
+        "('cinderella', 'attended', 'royal ball')", "('the prince', 'searched', 'the kingdom')", 
+        "('thomas marwick', 'is a', 'politician')", "('montebello', 'is part of', 'rockland county')",
+         "('george rankin', 'is a', 'politician')", "('montebello', 'located in', 'rockland county')", 
+         "('the prince', 'used', 'the lost glass slipper')", "('cinderella', 'was reunited with', 'prince')", 
+         "('marina', 'born in', 'minsk')"]
+        """
         self.fact_embedding_store.insert_strings([str(fact) for fact in facts])
 
         logger.info(f"Constructing Graph")
@@ -268,9 +308,15 @@ class HippoRAG:
         self.ent_node_to_chunk_ids = {}
 
         self.add_fact_edges(chunk_ids, chunk_triples)
+        """
+        num_new_chunks 所有新出现的文本片段；
+        """
         num_new_chunks = self.add_passage_edges(chunk_ids, chunk_triple_entities)
 
         if num_new_chunks > 0:
+            """
+            如果出现了新的文本片段，增加图；
+            """
             logger.info(f"Found {num_new_chunks} new chunks to save into graph.")
             self.add_synonymy_edges()
 
@@ -402,6 +448,10 @@ class HippoRAG:
         if not self.ready_to_retrieve:
             self.prepare_retrieval_objects()
 
+
+        """
+        对query进行 embedding
+        """
         self.get_query_embeddings(queries)
 
         retrieval_results = []
@@ -411,6 +461,17 @@ class HippoRAG:
             query_fact_scores = self.get_fact_scores(query)
             top_k_fact_indices, top_k_facts, rerank_log = self.rerank_facts(query, query_fact_scores)
             rerank_end = time.time()
+
+            """
+            mengyao_debug for query How did Cinderella reach her happy ending?
+            , query_fact_scores is [0.11414555 0.26471992 0.13887044 1.         0.         0.09841411
+             0.81096749 0.73974348 0.91281923 0.04663707 0.11163547 0.44101249
+             0.09769077 0.16271761 0.12138226]
+            , top_k_facts is [('cinderella', 'was reunited with', 'prince'), ('cinderella', 'attended', 'royal ball'), ('slipper', 'fit perfectly', 'cinderella'), ('the prince', 'used', 'the lost glass slipper'), ('the prince', 'searched', 'the kingdom')]
+            """
+            print(f"mengyao_debug for query {query}\n, "
+                  f"query_fact_scores is {query_fact_scores}\n,"
+                  f" top_k_facts is {top_k_facts}\n")
 
             self.rerank_time += rerank_end - rerank_start
 
@@ -447,6 +508,60 @@ class HippoRAG:
             return retrieval_results, overall_retrieval_result
         else:
             return retrieval_results
+
+
+    def do_some_tests(self):
+
+
+        print(f"mengyao_debug entity_embedding_store are {self.entity_embedding_store.get_all_id_to_rows()}")
+        print(f"mengyao_debug fact_embedding_store are {self.fact_embedding_store.get_all_id_to_rows()}")
+        print(f"mengyao_debug chunk_embedding_store are {self.chunk_embedding_store.get_all_id_to_rows()}")
+
+        vertices = self.graph.vs
+        print("所有顶点:", vertices["name"])
+
+        for vertex in vertices:
+            # 获取当前顶点的名称和索引
+            vertex_index = vertex.index
+            vertex_name = vertex["name"]
+
+            """
+            incident() 获取与该顶点关联的所有边
+            """
+            incident_edges = self.graph.incident(vertex_index)
+
+            print(f"\n顶点 {vertex_name} (索引 {vertex_index}) 连接的边:")
+            for edge_index in incident_edges:
+                edge = self.graph.es[edge_index]
+                print(f"""边 edge is {edge.attribute_names()}""")
+                source_vertex = edge.source
+                target_vertex = edge.target
+                source_name = self.graph.vs[source_vertex]["name"]
+                target_name = self.graph.vs[target_vertex]["name"]
+                print(f"  边 {edge_index}: {source_name} -> {target_name}")
+
+        ig.config["plotting.backend"] = "matplotlib"
+        import matplotlib.pyplot as plt
+        ig.plot(self.graph,
+             # 顶点大小和颜色
+             vertex_size=20,  # 顶点大小
+             vertex_color="lightblue",  # 顶点颜色
+             vertex_frame_color="black",  # 顶点边框颜色
+             vertex_frame_width=1,  # 顶点边框宽度
+
+             # 标签设置
+             vertex_label=self.graph.vs["name"],  # 顶点标签
+             vertex_label_size=12,  # 标签字体大小
+             vertex_label_color="black",  # 标签颜色
+             vertex_label_dist=1,  # 标签与顶点的距离
+             vertex_label_family="sans-serif",  # 字体
+
+             # 顶点形状
+             vertex_shape="circle"  # 顶点形状：circle, square, triangle, etc.
+             )
+
+        plt.show()
+
 
     def rag_qa(self,
                queries: List[str|QuerySolution],
@@ -490,7 +605,35 @@ class HippoRAG:
 
         if not isinstance(queries[0], QuerySolution):
             if gold_docs is not None:
+                print(f"mengyao_debug queries is {queries}")
+                print(f"mengyao_debug gold_docs is {gold_docs}")
                 queries, overall_retrieval_result = self.retrieve(queries=queries, gold_docs=gold_docs)
+                """
+                mengyao_debug queries are 
+                
+                [QuerySolution(question="What is George Rankin's occupation?", 
+                docs=['George Rankin is a politician.', 
+                'Thomas Marwick is a politician.', 
+                'Oliver Badman is a politician.', 
+                "Erik Hort's is a football playerLebron is a basketball player",
+                 "Erik Hort's is a football player",
+                  "Erik Hort's birthplace is Montebello.", 
+                  'Montebello is a part of Rockland County.', 'Marina is bom in Minsk.',
+                   'The prince used the lost glass slipper to search the kingdom.', 
+                   'Cinderella attended the royal ball.', 
+                   'When the slipper fit perfectly, Cinderella was reunited with the prince.'], 
+                   doc_scores=array([5.49541397e-02, 1.86953305e-02, 1.62742763e-02, 3.89548275e-03,
+                   3.55822712e-03, 2.35467701e-03, 1.83932354e-03, 1.83828781e-03,
+       1.82085458e-03, 6.55748926e-04, 1.76145178e-05])
+       
+                overall_retrieval_result is 
+                {'Recall@1': 0.6111, 'Recall@2': 0.7222, 'Recall@5': 1.0, 
+                'Recall@10': 1.0, 'Recall@20': 1.0, 'Recall@30': 1.0, 
+                'Recall@50': 1.0, 'Recall@100': 1.0, 'Recall@150': 1.0, 
+                'Recall@200': 1.0}
+       
+                """
+                print(f"mengyao_debug queries are {queries} overall_retrieval_result is {overall_retrieval_result}")
             else:
                 queries = self.retrieve(queries=queries)
 
@@ -753,7 +896,9 @@ class HippoRAG:
 
         logger.info(f"Adding OpenIE triples to graph.")
 
+        print(f"mengyao_debug chunk_triples is {chunk_triples}")
         for chunk_key, triples in tqdm(zip(chunk_ids, chunk_triples)):
+            print(f"mengyao_debug chunk_key is {chunk_key} triples is {triples}")
             entities_in_chunk = set()
 
             if chunk_key not in current_graph_nodes:
@@ -773,6 +918,7 @@ class HippoRAG:
 
                 for node in entities_in_chunk:
                     self.ent_node_to_chunk_ids[node] = self.ent_node_to_chunk_ids.get(node, set()).union(set([chunk_key]))
+
 
     def add_passage_edges(self, chunk_ids: List[str], chunk_triple_entities: List[List[str]]):
         """
@@ -797,6 +943,8 @@ class HippoRAG:
                 The number of new passage nodes added to the graph.
         """
 
+        print(f"mengyao_debug graph Vertex sequence is {self.graph.vs}")
+        print(f"mengyao_debug graph Edge sequence is {self.graph.es}")
         if "name" in self.graph.vs.attribute_names():
             current_graph_nodes = set(self.graph.vs["name"])
         else:
@@ -805,8 +953,18 @@ class HippoRAG:
         num_new_chunks = 0
 
         logger.info(f"Connecting passage nodes to phrase nodes.")
+        """
+        current_graph_nodes = 
+        {'entity-8832a7190f55e53078e8aa42aad1e5b2', 'entity-5c2c2a6c9bed1b1e962c6800b4edfb11', 
+        'entity-781056079c8858c93d50d48e995a0a5d', 'entity-6e4c0c8f04b4f89187eda8cc2c988ad4', 
+        'entity-7c6d9030e4c7630407701d43317f0af1', 'chunk-733ff7b5b1080ca4eb636ab168e5662d', 
+        'chunk-435eaa3536ea075eb9b3cee5c14a4840', 'chunk-d6df73e3b8e71d69e39075792fb855cf', 
+        'chunk-05ebe6854219bf0492e050c241805da4', 'entity-4382e967a6b504ff11a3f78bd80a8a6d'}
+        """
+        print(f"mengyao_debug current_graph_nodes are {current_graph_nodes}")
 
         for idx, chunk_key in tqdm(enumerate(chunk_ids)):
+            print(f"mengyao_debug appending idx {idx}, chunk key {chunk_key}")
 
             if chunk_key not in current_graph_nodes:
                 for chunk_ent in chunk_triple_entities[idx]:
@@ -816,6 +974,9 @@ class HippoRAG:
 
                 num_new_chunks += 1
 
+        """
+        获取所有新出现的chunk，也就是文本片段；
+        """
         return num_new_chunks
 
     def add_synonymy_edges(self):
@@ -842,6 +1003,30 @@ class HippoRAG:
 
         logger.info(f"Performing KNN retrieval for each phrase nodes ({len(entity_node_keys)}).")
 
+        """
+        entity_id_to_row: 
+        {
+        'entity-583fea53729bcb119bc1099a0dc5e73d': 
+        {'hash_id': 'entity-583fea53729bcb119bc1099a0dc5e73d', 'content': 'cinderella'}, 
+        'entity-a92df5e4b3532f7dfdf8fca579bbbf70': 
+        {'hash_id': 'entity-a92df5e4b3532f7dfdf8fca579bbbf70', 'content': 'erik hort'}, 
+        'entity-b20945cd87385383acdd501bfd178936': 
+        {'hash_id': 'entity-b20945cd87385383acdd501bfd178936', 'content': 'george rankin'}
+        }
+        
+        entity_node_keys is 
+        ['entity-583fea53729bcb119bc1099a0dc5e73d', 
+        'entity-a92df5e4b3532f7dfdf8fca579bbbf70', 
+        'entity-b20945cd87385383acdd501bfd178936', 
+        'entity-ce5225d01c39d2567bc229501d9e610d', 
+        'entity-5c2c2a6c9bed1b1e962c6800b4edfb11']
+        
+        """
+        print(f"mengyao_debug entity_id_to_row is {self.entity_id_to_row}\n"
+              f"entity_node_keys is {entity_node_keys}")
+
+
+
         entity_embs = self.entity_embedding_store.get_embeddings(entity_node_keys)
 
         # Here we build synonymy edges only between newly inserted phrase nodes and all phrase nodes in the storage to reduce cost for incremental graph updates
@@ -853,9 +1038,14 @@ class HippoRAG:
                                                     query_batch_size=self.global_config.synonymy_edge_query_batch_size,
                                                     key_batch_size=self.global_config.synonymy_edge_key_batch_size)
 
+
+        print(f"mengyao_debug query_node_key2knn_node_keys is {query_node_key2knn_node_keys}")
         num_synonym_triple = 0
         synonym_candidates = []  # [(node key, [(synonym node key, corresponding score), ...]), ...]
 
+        """
+        根据embeddings找同义词，不过这个感觉效率有点低怎么把图遍历了一遍，是不是只遍历新增加的node就可以？
+        """
         for node_key in tqdm(query_node_key2knn_node_keys.keys(), total=len(query_node_key2knn_node_keys)):
             synonyms = []
 
@@ -880,6 +1070,7 @@ class HippoRAG:
                         num_nns += 1
 
             synonym_candidates.append((node_key, synonyms))
+            print(f"mengyao_debug synonym_candidates are {synonym_candidates}")
 
     def load_existing_openie(self, chunk_keys: List[str]) -> Tuple[List[dict], Set[str]]:
         """
@@ -1034,6 +1225,8 @@ class HippoRAG:
         entity_to_row = self.entity_embedding_store.get_all_id_to_rows()
         passage_to_row = self.chunk_embedding_store.get_all_id_to_rows()
 
+        print(f"mengyao_debug entity_to_row is {entity_to_row}\n"
+              f"passage_to_row is {passage_to_row}")
         node_to_rows = entity_to_row
         node_to_rows.update(passage_to_row)
 
@@ -1046,6 +1239,7 @@ class HippoRAG:
                         new_nodes[k] = []
                     new_nodes[k].append(v)
 
+        print(f"mengyao_debug new_nodes are {new_nodes}")
         if len(new_nodes) > 0:
             self.graph.add_vertices(n=len(next(iter(new_nodes.values()))), attributes=new_nodes)
 
@@ -1060,30 +1254,44 @@ class HippoRAG:
         edge_source_node_keys = []
         edge_target_node_keys = []
         edge_metadata = []
+        print(f"mengyao_debug self.node_to_node_stats is {self.node_to_node_stats}")
         for edge, weight in self.node_to_node_stats.items():
-            if edge[0] == edge[1]: continue
+            if edge[0] == edge[1]:
+                continue
             graph_adj_list[edge[0]][edge[1]] = weight
             graph_inverse_adj_list[edge[1]][edge[0]] = weight
 
             edge_source_node_keys.append(edge[0])
             edge_target_node_keys.append(edge[1])
             edge_metadata.append({
-                "weight": weight
+                "weight": weight,
+                "verb": "verb_demo",
             })
 
-        valid_edges, valid_weights = [], {"weight": []}
+        valid_edges, valid_weights = [], {"weight": [], "verbs": []}
         current_node_ids = set(self.graph.vs["name"])
+        print(f"mengyao_debug current_node_ids is {current_node_ids}")
+        print(f"mengyao_debug edge_source_node_keys is {edge_source_node_keys}")
+        print(f"mengyao_debug edge_target_node_keys is {edge_target_node_keys}")
+        print(f"mengyao_debug edge_metadata is {edge_metadata}")
         for source_node_id, target_node_id, edge_d in zip(edge_source_node_keys, edge_target_node_keys, edge_metadata):
             if source_node_id in current_node_ids and target_node_id in current_node_ids:
                 valid_edges.append((source_node_id, target_node_id))
                 weight = edge_d.get("weight", 1.0)
+                verb = edge_d.get("verb", "v2")
                 valid_weights["weight"].append(weight)
+                valid_weights["verbs"].append(verb)
             else:
                 logger.warning(f"Edge {source_node_id} -> {target_node_id} is not valid.")
-        self.graph.add_edges(
+
+        print(f"mengyao_debug valid_edges are {valid_edges}")
+        print(f"mengyao_debug valid_weights are {valid_weights}")
+        print(f"mengyao_debug graph add valid edges {valid_edges}, attributes {valid_weights}")
+        res = self.graph.add_edges(
             valid_edges,
             attributes=valid_weights
         )
+        print(f"mengyao_debug add graph edges res is {res}")
 
     def save_igraph(self):
         logger.info(
@@ -1154,6 +1362,7 @@ class HippoRAG:
         """
 
         logger.info("Preparing for fast retrieval.")
+        print(f"mengyao_debug prepare_retrieval_objects")
 
         logger.info("Loading keys.")
         self.query_to_embedding: Dict = {'triple': {}, 'passage': {}}
@@ -1205,6 +1414,8 @@ class HippoRAG:
         self.entity_embeddings = np.array(self.entity_embedding_store.get_embeddings(self.entity_node_keys))
         self.passage_embeddings = np.array(self.chunk_embedding_store.get_embeddings(self.passage_node_keys))
 
+
+        print(f"mengyao_debug fact_node_keys is {self.fact_node_keys}")
         self.fact_embeddings = np.array(self.fact_embedding_store.get_embeddings(self.fact_node_keys))
 
         all_openie_info, chunk_keys_to_process = self.load_existing_openie([])
@@ -1263,6 +1474,7 @@ class HippoRAG:
         """
 
         all_query_strings = []
+        print(f"mengyao_debug self.query_to_embedding is {self.query_to_embedding}")
         for query in queries:
             if isinstance(query, QuerySolution) and (
                     query.question not in self.query_to_embedding['triple'] or query.question not in
@@ -1271,12 +1483,16 @@ class HippoRAG:
             elif query not in self.query_to_embedding['triple'] or query not in self.query_to_embedding['passage']:
                 all_query_strings.append(query)
 
+        print(f"mengyao_debug all_query_strings are {all_query_strings}")
+
         if len(all_query_strings) > 0:
             # get all query embeddings
             logger.info(f"Encoding {len(all_query_strings)} queries for query_to_fact.")
             query_embeddings_for_triple = self.embedding_model.batch_encode(all_query_strings,
                                                                             instruction=get_query_instruction('query_to_fact'),
                                                                             norm=True)
+
+            print(f"mengyao_debug query_embeddings_for_triple are {query_embeddings_for_triple}")
             for query, embedding in zip(all_query_strings, query_embeddings_for_triple):
                 self.query_to_embedding['triple'][query] = embedding
 
@@ -1284,6 +1500,8 @@ class HippoRAG:
             query_embeddings_for_passage = self.embedding_model.batch_encode(all_query_strings,
                                                                              instruction=get_query_instruction('query_to_passage'),
                                                                              norm=True)
+
+            print(f"mengyao_debug query_embeddings_for_passage are {query_embeddings_for_passage}")
             for query, embedding in zip(all_query_strings, query_embeddings_for_passage):
                 self.query_to_embedding['passage'][query] = embedding
 
@@ -1317,7 +1535,8 @@ class HippoRAG:
         if len(self.fact_embeddings) == 0:
             logger.warning("No facts available for scoring. Returning empty array.")
             return np.array([])
-            
+
+        print(f"mengyao_debug self.fact_embeddings is {self.fact_embeddings}")
         try:
             query_fact_scores = np.dot(self.fact_embeddings, query_embedding.T) # shape: (#facts, )
             query_fact_scores = np.squeeze(query_fact_scores) if query_fact_scores.ndim == 2 else query_fact_scores
@@ -1443,10 +1662,16 @@ class HippoRAG:
 
         phrases_and_ids = set()
 
+        print(f"mengyao_debug query_fact_scores is {query_fact_scores}")
+
         for rank, f in enumerate(top_k_facts):
+            """
+            主谓宾
+            """
             subject_phrase = f[0].lower()
             predicate_phrase = f[1].lower()
             object_phrase = f[2].lower()
+            ## score是通过 fact 和 query算出来的；
             fact_score = query_fact_scores[
                 top_k_fact_indices[rank]] if query_fact_scores.ndim > 0 else query_fact_scores
 
@@ -1468,6 +1693,8 @@ class HippoRAG:
 
                 phrases_and_ids.add((phrase, phrase_id))
 
+        print(f"mengyao_debug phrases_and_ids are {phrases_and_ids}")
+
         phrase_weights /= number_of_occurs
 
         for phrase, phrase_id in phrases_and_ids:
@@ -1480,14 +1707,24 @@ class HippoRAG:
         for phrase, scores in phrase_scores.items():
             linking_score_map[phrase] = float(np.mean(scores))
 
+        print(f"mengyao_debug phrase_scores is {phrase_scores}")
+
         if link_top_k:
             phrase_weights, linking_score_map = self.get_top_k_weights(link_top_k,
                                                                            phrase_weights,
                                                                            linking_score_map)  # at this stage, the length of linking_scope_map is determined by link_top_k
+        print(f"mengyao_debug linking_score_map are {linking_score_map}")
 
         #Get passage scores according to chosen dense retrieval model
+        """
+        文章和问题之间的相关性；
+        """
         dpr_sorted_doc_ids, dpr_sorted_doc_scores = self.dense_passage_retrieval(query)
         normalized_dpr_sorted_scores = min_max_normalize(dpr_sorted_doc_scores)
+        print(f"mengyao_debug dpr_sorted_doc_ids are {dpr_sorted_doc_ids}")
+        print(f"mengyao_debug dpr_sorted_doc_scores are {dpr_sorted_doc_scores}")
+        print(f"mengyao_debug normalized_dpr_sorted_scores are {normalized_dpr_sorted_scores}")
+
 
         for i, dpr_sorted_doc_id in enumerate(dpr_sorted_doc_ids.tolist()):
             passage_node_key = self.passage_node_keys[dpr_sorted_doc_id]
@@ -1498,6 +1735,11 @@ class HippoRAG:
             linking_score_map[passage_node_text] = passage_dpr_score * passage_node_weight
 
         #Combining phrase and passage scores into one array for PPR
+        """
+        把两个加起来了
+        """
+        print(f"mengyao_debug phrase_weights are {phrase_weights}")
+        print(f"mengyao_debug passage_weights are {passage_weights}")
         node_weights = phrase_weights + passage_weights
 
         #Recording top 30 facts in linking_score_map
@@ -1535,7 +1777,14 @@ class HippoRAG:
         """
         # load args
         link_top_k: int = self.global_config.linking_top_k
-        
+
+        """
+        mengyao_debug query_fact_scores is [0.13013543 0.40800445 1.         0.10302908 0.03689147 0.29024954
+         0.02906869 0.         0.06840486 0.18845899 0.30114114 0.10817363
+         0.73208546 0.00154711 0.76821265], link_top_k is 5
+        """
+        print(f"mengyao_debug query_fact_scores is {query_fact_scores}, link_top_k is {link_top_k}")
+
         # Check if there are any facts to rerank
         if len(query_fact_scores) == 0 or len(self.fact_node_keys) == 0:
             logger.warning("No facts available for reranking. Returning empty lists.")
@@ -1554,6 +1803,15 @@ class HippoRAG:
             real_candidate_fact_ids = [self.fact_node_keys[idx] for idx in candidate_fact_indices]
             fact_row_dict = self.fact_embedding_store.get_rows(real_candidate_fact_ids)
             candidate_facts = [eval(fact_row_dict[id]['content']) for id in real_candidate_fact_ids]
+
+            """
+            mengyao_debug real_candidate_fact_ids is ['fact-a798cac753d0f061a97a12678ae0175c', 'fact-1341a29a71946ff5dfae70703714cab4', 'fact-55ffb21c5c0d711781232e80fda1baea', 'fact-2877d96752c9607ed3dae9a59dffc8d9', 'fact-4fd022a97d99c09abd4c9126a43319c2']
+             fact_row_dict is {'fact-a798cac753d0f061a97a12678ae0175c': {'hash_id': 'fact-a798cac753d0f061a97a12678ae0175c', 'content': "('erik hort', 'birthplace', 'montebello')"}, 'fact-1341a29a71946ff5dfae70703714cab4': {'hash_id': 'fact-1341a29a71946ff5dfae70703714cab4', 'content': "('erik hort', 'is', 'football player')"}, 'fact-55ffb21c5c0d711781232e80fda1baea': {'hash_id': 'fact-55ffb21c5c0d711781232e80fda1baea', 'content': "('erik hort', 'is a', 'football player')"}, 'fact-2877d96752c9607ed3dae9a59dffc8d9': {'hash_id': 'fact-2877d96752c9607ed3dae9a59dffc8d9', 'content': "('marina', 'born in', 'minsk')"}, 'fact-4fd022a97d99c09abd4c9126a43319c2': {'hash_id': 'fact-4fd022a97d99c09abd4c9126a43319c2', 'content': "('montebello', 'located in', 'rockland county')"}}
+             candidate_facts is [('erik hort', 'birthplace', 'montebello'), ('erik hort', 'is', 'football player'), ('erik hort', 'is a', 'football player'), ('marina', 'born in', 'minsk'), ('montebello', 'located in', 'rockland county')]
+            """
+            print(f"mengyao_debug real_candidate_fact_ids is {real_candidate_fact_ids}\n "
+                  f"fact_row_dict is {fact_row_dict}\n "
+                  f"candidate_facts is {candidate_facts}")
             
             # Rerank the facts
             top_k_fact_indices, top_k_facts, reranker_dict = self.rerank_filter(query,
@@ -1562,6 +1820,15 @@ class HippoRAG:
                                                                                 len_after_rerank=link_top_k)
             
             rerank_log = {'facts_before_rerank': candidate_facts, 'facts_after_rerank': top_k_facts}
+
+            """
+             mengyao_debug top_k_fact_indices is [2, 10]
+             top_k_facts is [('erik hort', 'birthplace', 'montebello'), ('montebello', 'located in', 'rockland county')]
+             reranker_dict is {'confidence': None}
+            """
+            print(f"mengyao_debug top_k_fact_indices is {top_k_fact_indices}\n "
+                  f"top_k_facts is {top_k_facts}\n "
+                  f"reranker_dict is {reranker_dict}")
             
             return top_k_fact_indices, top_k_facts, rerank_log
             

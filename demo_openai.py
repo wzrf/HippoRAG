@@ -5,6 +5,7 @@ import argparse
 import logging
 
 from src.hipporag import HippoRAG
+logger = logging.getLogger(__name__)
 
 def main():
 
@@ -20,6 +21,8 @@ def main():
         "Marina is bom in Minsk.",
         "Montebello is a part of Rockland County."
     ]
+
+    print("started")
 
     save_dir = 'outputs/openai'  # Define save directory for HippoRAG objects (each LLM/Embedding model combination will create a new subdirectory)
     llm_model_name = 'gpt-4o-mini'  # Any OpenAI model name

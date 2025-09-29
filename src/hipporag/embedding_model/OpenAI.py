@@ -2,6 +2,7 @@ from copy import deepcopy
 from typing import List, Optional
 
 import numpy as np
+import os
 import torch
 from tqdm import tqdm
 from transformers import AutoModel
@@ -32,6 +33,7 @@ class OpenAIEmbeddingModel(BaseEmbeddingModel):
 
         if self.global_config.azure_embedding_endpoint is None:
             self.client = OpenAI(
+                api_key=os.getenv("DASHSCOPE_API_KEY"),
                 base_url=self.global_config.embedding_base_url
             )
         else:
@@ -73,6 +75,7 @@ class OpenAIEmbeddingModel(BaseEmbeddingModel):
     def encode(self, texts: List[str]):
         texts = [t.replace("\n", " ") for t in texts]
         texts = [t if t != '' else ' ' for t in texts]
+        print(f"mengyao_debug embedding_model_name is {self.embedding_model_name}, texts size is {len(texts)}")
         response = self.client.embeddings.create(input=texts, model=self.embedding_model_name)
         results = np.array([v.embedding for v in response.data])
 
@@ -91,9 +94,10 @@ class OpenAIEmbeddingModel(BaseEmbeddingModel):
 
         logger.debug(f"Calling {self.__class__.__name__} with:\n{params}")
 
-        batch_size = params.pop("batch_size", 16)
+        batch_size = params.pop("batch_size", 10)
 
         if len(texts) <= batch_size:
+            ## 对文本进行encode
             results = self.encode(texts)
         else:
             pbar = tqdm(total=len(texts), desc="Batch Encoding")

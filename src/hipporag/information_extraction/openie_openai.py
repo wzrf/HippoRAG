@@ -45,6 +45,7 @@ class OpenIE:
     def ner(self, chunk_key: str, passage: str) -> NerRawOutput:
         # PREPROCESSING
         ner_input_message = self.prompt_template_manager.render(name='ner', passage=passage)
+        print(f"mengyao_debug ner_input_message is {ner_input_message}")
         raw_response = ""
         metadata = {}
         try:
@@ -60,7 +61,13 @@ class OpenIE:
             extracted_entities = _extract_ner_from_response(real_response)
             unique_entities = list(dict.fromkeys(extracted_entities))
 
+            """
+            mengyao_debug extracted_entities is ['Erik Hort'] unique_entities is ['Erik Hort']
+            """
+            print(f"mengyao_debug extracted_entities is {extracted_entities} unique_entities is {unique_entities}")
+
         except Exception as e:
+            print(f"mengyao_debug failed to extract entities, exception is {e}")
             # For any other unexpected exceptions, log them and return with the error message
             logger.warning(e)
             metadata.update({'error': str(e)})
@@ -94,6 +101,8 @@ class OpenIE:
             named_entity_json=json.dumps({"named_entities": named_entities})
         )
 
+        print(f"mengyao_debug triple_extraction querying LLM using messages {messages}")
+
         raw_response = ""
         metadata = {}
         try:
@@ -108,6 +117,18 @@ class OpenIE:
                 real_response = raw_response
             extracted_triples = _extract_triples_from_response(real_response)
             triplets = filter_invalid_triples(triples=extracted_triples)
+            print(f"mengyao_debug triple_extraction \n"
+                  f"passage is {passage}\n"
+                  f"extracted_triples are {extracted_triples}\n"
+                  f"triplets are {triplets}\n")
+
+            """
+            mengyao_debug triple_extraction
+            passage is Erik Hort's is a football player
+            extracted_triples are [['Erik Hort', 'is a', 'football player']]
+            triplets are [['Erik Hort', 'is a', 'football player']]
+            """
+
 
         except Exception as e:
             logger.warning(f"Exception for chunk {chunk_key}: {e}")
@@ -128,6 +149,7 @@ class OpenIE:
         )
 
     def openie(self, chunk_key: str, passage: str) -> Dict[str, Any]:
+        print("doing open IE!!")
         ner_output = self.ner(chunk_key=chunk_key, passage=passage)
         triple_output = self.triple_extraction(chunk_key=chunk_key, passage=passage, named_entities=ner_output.unique_entities)
         return {"ner": ner_output, "triplets": triple_output}
