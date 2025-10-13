@@ -150,7 +150,13 @@ class OpenIE:
 
     def openie(self, chunk_key: str, passage: str) -> Dict[str, Any]:
         print("doing open IE!!")
+        """
+        首先获取所有的名词 entities
+        """
         ner_output = self.ner(chunk_key=chunk_key, passage=passage)
+        """
+        然后提取三元组
+        """
         triple_output = self.triple_extraction(chunk_key=chunk_key, passage=passage, named_entities=ner_output.unique_entities)
         return {"ner": ner_output, "triplets": triple_output}
 

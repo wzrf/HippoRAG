@@ -3,6 +3,7 @@ from ...utils.llm_utils import convert_format_to_template
 
 ner_conditioned_re_system = """Your task is to construct an RDF (Resource Description Framework) graph from the given passages and named entity lists. 
 Respond with a JSON list of triples, with each triple representing a relationship in the RDF graph. 
+如果问题是中文的话，输出中文；如果问题是英文的话，输出英文。
 
 Pay attention to the following requirements:
 - Each triple should contain at least one, but preferably two, of the named entities in the list for each passage.

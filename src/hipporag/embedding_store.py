@@ -65,7 +65,7 @@ class EmbeddingStore:
     存储在本地向量数据库
     """
     def insert_strings(self, texts: List[str]):
-        print(f"mengyao_debug insert_strings texts is {texts}")
+        # print(f"mengyao_debug insert_strings texts is {texts}")
         nodes_dict = {}
 
         for text in texts:

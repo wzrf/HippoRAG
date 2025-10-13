@@ -43,6 +43,7 @@ class DSPyFilter:
         else:
             dspy_saved = best_dspy_prompt
 
+
         system_prompt = dspy_saved['prog']['system']
         message_template = [
             {"role": "system", "content": system_prompt},

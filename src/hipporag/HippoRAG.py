@@ -5,6 +5,7 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from typing import Union, Optional, List, Set, Dict, Any, Tuple, Literal
 import numpy as np
+import random
 import importlib
 from collections import defaultdict
 from transformers import HfArgumentParser
@@ -245,6 +246,7 @@ class HippoRAG:
         docs：原始文本
         """
 
+        print(f"mengyao_debug docs are {docs}, inserting into chunk_embedding_store")
         self.chunk_embedding_store.insert_strings(docs)
         """
         hash_id -> text
@@ -269,8 +271,10 @@ class HippoRAG:
         if self.global_config.save_openie:
             self.save_openie_results(all_openie_info)
 
-        print(f"mengyao_debug all_openie_info is {all_openie_info}")
+
         ner_results_dict, triple_results_dict = reformat_openie_results(all_openie_info)
+        print(f"mengyao_debug ner_results_dict is {ner_results_dict}")
+        print(f"mengyao_debug triple_results_dict is {triple_results_dict}")
 
         assert len(chunk_to_rows) == len(ner_results_dict) == len(triple_results_dict), f"len(chunk_to_rows): {len(chunk_to_rows)}, len(ner_results_dict): {len(ner_results_dict)}, len(triple_results_dict): {len(triple_results_dict)}"
 
@@ -278,8 +282,13 @@ class HippoRAG:
         chunk_ids = list(chunk_to_rows.keys())
 
         chunk_triples = [[text_processing(t) for t in triple_results_dict[chunk_id].triples] for chunk_id in chunk_ids]
+        # print(f"mengyao_debug chunk_triples is {chunk_triples}")
         entity_nodes, chunk_triple_entities = extract_entity_nodes(chunk_triples)
         facts = flatten_facts(chunk_triples)
+
+        print(f"mengyao_debug entity_nodes is {entity_nodes}\n"
+              f"chunk_triple_entities is {chunk_triple_entities}\n"
+              f"facts is {facts}")
 
         logger.info(f"Encoding Entities")
         """
@@ -457,8 +466,13 @@ class HippoRAG:
         retrieval_results = []
 
         for q_idx, query in tqdm(enumerate(queries), desc="Retrieving", total=len(queries)):
+            print(f"query is {query}")
             rerank_start = time.time()
+            """
+            mengyao_debug 找到和query相关的 fact。
+            """
             query_fact_scores = self.get_fact_scores(query)
+            print(f"query_fact_scores is {query_fact_scores}")
             top_k_fact_indices, top_k_facts, rerank_log = self.rerank_facts(query, query_fact_scores)
             rerank_end = time.time()
 
@@ -479,6 +493,9 @@ class HippoRAG:
                 logger.info('No facts found after reranking, return DPR results')
                 sorted_doc_ids, sorted_doc_scores = self.dense_passage_retrieval(query)
             else:
+                """
+                使用找到的fact 去搜索对应的doc
+                """
                 sorted_doc_ids, sorted_doc_scores = self.graph_search_with_fact_entities(query=query,
                                                                                          link_top_k=self.global_config.linking_top_k,
                                                                                          query_fact_scores=query_fact_scores,
@@ -486,7 +503,12 @@ class HippoRAG:
                                                                                          top_k_fact_indices=top_k_fact_indices,
                                                                                          passage_node_weight=self.global_config.passage_node_weight)
 
+            print(f"num_to_retrieve top is {num_to_retrieve}")
+            top_k_docs_hash = [self.passage_node_keys[idx] for idx in sorted_doc_ids[:num_to_retrieve]]
             top_k_docs = [self.chunk_embedding_store.get_row(self.passage_node_keys[idx])["content"] for idx in sorted_doc_ids[:num_to_retrieve]]
+
+            print(f"top_k_docs is {top_k_docs}")
+            print(f"top_k_docs_hash is {top_k_docs_hash}")
 
             retrieval_results.append(QuerySolution(question=query, docs=top_k_docs, doc_scores=sorted_doc_scores[:num_to_retrieve]))
 
@@ -510,7 +532,7 @@ class HippoRAG:
             return retrieval_results
 
 
-    def do_some_tests(self):
+    def do_some_tests(self, save_directory: str):
 
         new_graph = self.graph.copy()
 
@@ -522,29 +544,6 @@ class HippoRAG:
         vertices = new_graph.vs
         print("所有顶点:", vertices["name"])
 
-        for vertex in vertices:
-            # 获取当前顶点的名称和索引
-            vertex_index = vertex.index
-            vertex_name = vertex["name"]
-
-            """
-            incident() 获取与该顶点关联的所有边
-            """
-            incident_edges = new_graph.incident(vertex_index)
-
-            print(f"\n顶点 {vertex_name} (索引 {vertex_index}) 连接的边:")
-            for edge_index in incident_edges:
-                edge = new_graph.es[edge_index]
-                print(f"""边 edge is {edge.attribute_names()}, 这个边有以下属性：\n""")
-                for attr in edge.attribute_names():
-                    print(f""" 【{attr}】：【{new_graph.es[attr]}】""")
-
-                source_vertex = edge.source
-                target_vertex = edge.target
-                source_name = new_graph.vs[source_vertex]["name"]
-                target_name = new_graph.vs[target_vertex]["name"]
-                print(f"  边 {edge_index}: {source_name} -> {target_name}")
-
         # 3. 遍历所有边，删除所有连接到chunk上面的边。
         edges_to_remove = []
 
@@ -553,7 +552,11 @@ class HippoRAG:
             # 获取边的所有属性
             edge_attrs = edge.attributes()
             # 检查权重是否为1
-            if "attributes" in edge_attrs and "contains" in edge_attrs["attributes"]:
+            """
+            删除contains（指向chunks）以及synonymy
+            """
+            if ("attributes" in edge_attrs and "contains" in edge_attrs["attributes"]
+                    or "synonymy" in edge_attrs["attributes"]):
                 edges_to_remove.append(edge.index)
             else:
                 if "attributes" in edge_attrs:
@@ -566,7 +569,7 @@ class HippoRAG:
         edges_to_remove.sort(reverse=True)
         for edge_index in edges_to_remove:
             new_graph.delete_edges(edge_index)
-            print(f"已删除边索引 {edge_index}")
+            # print(f"已删除边索引 {edge_index}")
 
 
         # 再删除chunk点，防止图太乱：
@@ -584,9 +587,35 @@ class HippoRAG:
 
             for vertex_index in vertices_to_remove:
                 new_graph.delete_vertices(vertex_index)
-                print(f"已删除顶点索引 {vertex_index}")
+                # print(f"已删除顶点索引 {vertex_index}")
         else:
             print("\n没有找到标签包含'chunk'的顶点")
+
+
+        passages_summary = ""
+        all_fact_set = set()
+        entities_count = {}
+        ## 打印所有边：
+        for edge in new_graph.es:
+            source_vertex = edge.source
+            target_vertex = edge.target
+            source_name = new_graph.vs[source_vertex]["content"]
+            target_name = new_graph.vs[target_vertex]["content"]
+            edge_attrs = edge.attributes()
+            all_fact_set.add(f"""{source_name}{edge_attrs["attributes"][0]}{target_name}""")
+
+            if target_name not in entities_count:
+                entities_count[target_name] = 0
+            if source_name not in entities_count:
+                entities_count[source_name] = 0
+            entities_count[source_name] = entities_count[source_name] + 1
+            entities_count[target_name] = entities_count[target_name] + 1
+
+        sorted_items = sorted(entities_count.items(), key=lambda item: (-item[1], item[0]))
+        top_10 = sorted_items[:10]
+
+        print(f"""passages_summary is {all_fact_set}""")
+        print(f"""top_10 is {top_10}""")
 
 
         all_vertices_names = []
@@ -597,28 +626,188 @@ class HippoRAG:
                 all_vertices_names.append(self.entity_embedding_store.get_all_id_to_rows()[name]["content"])
         ig.config["plotting.backend"] = "matplotlib"
         import matplotlib.pyplot as plt
-        ig.plot(new_graph,
-             # 顶点大小和颜色
-             vertex_size=20,  # 顶点大小
-             vertex_color="lightblue",  # 顶点颜色
-             vertex_frame_color="black",  # 顶点边框颜色
-             vertex_frame_width=1,  # 顶点边框宽度
+        plt.rcParams['font.sans-serif'] = ['SimHei']  # 用来正常显示中文标签
+        # ig.plot(new_graph,
+        #      # 顶点大小和颜色
+        #      vertex_size=20,  # 顶点大小
+        #      vertex_color="lightblue",  # 顶点颜色
+        #      vertex_frame_color="black",  # 顶点边框颜色
+        #      vertex_frame_width=1,  # 顶点边框宽度
+        #
+        #      # 标签设置
+        #      vertex_label= all_vertices_names,
+        #      vertex_label_size=8,  # 标签字体大小
+        #      vertex_label_color="black",  # 标签颜色
+        #      vertex_label_dist=1,  # 标签与顶点的距离
+        #      vertex_label_family="sans-serif",  # 字体
+        #
+        #      edge_label=new_graph.es["attributes"],
+        #      edge_label_size=8,  # 标签字体大小
+        #
+        #      # 顶点形状
+        #      vertex_shape="circle"  # 顶点形状：circle, square, triangle, etc.
+        #      )
 
-             # 标签设置
-             vertex_label= all_vertices_names,
-             vertex_label_size=12,  # 标签字体大小
-             vertex_label_color="black",  # 标签颜色
-             vertex_label_dist=1,  # 标签与顶点的距离
-             vertex_label_family="sans-serif",  # 字体
+        # plt.show()
 
-             edge_label=new_graph.es["attributes"],
+        def not_fully_contains(current: list, to_be_chosen: list) -> bool:
+            for entities in to_be_chosen:
+                if entities not in current:
+                    return True
+            return False
 
-             # 顶点形状
-             vertex_shape="circle"  # 顶点形状：circle, square, triangle, etc.
-             )
+        def get_next_hop(current: list, node_without_usable_edges: set) -> int:
+            for index in reversed(range(len(current))):
+                if current[index] not in node_without_usable_edges:
+                    return current[index]
+            return -1
 
-        plt.show()
+        def draw_graph(new_nodes: dict, valid_edges: list, valid_attributes: dict, index: int):
+            print(f"draw_graph new_nodes is {new_nodes}")
+            graph = ig.Graph(directed=self.global_config.is_directed_graph)
+            graph.add_vertices(n=len(next(iter(new_nodes.values()))), attributes=new_nodes)
+            graph.add_edges(
+                valid_edges,
+                attributes=valid_attributes
+            )
 
+            plt.rcParams['font.sans-serif'] = ['SimHei']  # 用来正常显示中文标签
+            ig.plot(graph,
+                    # 顶点大小和颜色
+                    vertex_size=20,  # 顶点大小
+                    vertex_color="lightblue",  # 顶点颜色
+                    vertex_frame_color="black",  # 顶点边框颜色
+                    vertex_frame_width=1,  # 顶点边框宽度
+
+                    # 标签设置
+                    vertex_label=new_nodes["content"],
+                    vertex_label_size=8,  # 标签字体大小
+                    vertex_label_color="black",  # 标签颜色
+                    vertex_label_dist=1,  # 标签与顶点的距离
+                    vertex_label_family="sans-serif",  # 字体
+
+                    edge_label=graph.es["attributes"],
+                    edge_label_size=8,  # 标签字体大小
+
+                    # 顶点形状
+                    vertex_shape="circle"  # 顶点形状：circle, square, triangle, etc.
+                    )
+
+            # plt.show()
+            plt.savefig(f"{save_directory}/multi_hop/multi_hop_{index}.jpeg", dpi=600)
+            plt.close()
+            print(f"mengyao_debug draw_graph graph is {graph}")
+
+        def generate_multihop(index: int) -> bool:
+            nodes_no_hop = set()
+            chunks_found = set()
+            chunks_list = []
+            nodes_hopped = [] ## (a, b)
+            edges_index_hopped = [] ## just index
+            edges_hopped = []
+            valid_attributes = {
+                "attributes": []
+            }
+            facts_list = []
+            total_hop = 30
+            total_chunks = 20
+            ## 开始multihop
+            ## 假设是5跳：
+            vertex_ids = [v.index for v in new_graph.vs]  # 获取所有顶点ID
+            initial_vertex = random.choice(vertex_ids)
+            nodes_hopped.append(initial_vertex)
+            while len(chunks_found)<total_chunks or len(edges_hopped) < total_hop:
+                random_vertex = get_next_hop(nodes_hopped, nodes_no_hop)
+                if random_vertex == -1:
+                    print(f"跳不下去了，结束！")
+                    return False
+                incident_edges = new_graph.incident(random_vertex, mode="all")
+                print(f"随机选择的顶点: {random_vertex}, edges {incident_edges}")
+                if incident_edges:
+                    """
+                    随机选择一条边
+                    """
+                    random_edge = random.choice(incident_edges)
+                    """
+                    如果这条边存在了就不要再走了；
+                    但是跳转到一个已经存在的点是被允许的，因为允许成环；
+                    """
+                    if random_edge in edges_index_hopped:
+                        if not_fully_contains(edges_index_hopped, incident_edges):
+                            print(f"这条边已经走过了，重试")
+                            continue
+                        else:
+                            ## 这个点的所有边都已经被选择过了，这个点已经不能再跳了必须回头了
+                            nodes_no_hop.add(random_vertex)
+                            print(f"没有可跳的方向了，回头")
+                            continue
+
+                    edge_info = new_graph.es[random_edge]
+                    source_vertex = edge_info.source
+                    target_vertex = edge_info.target
+                    """
+                    add vertex and edges to the nodes and edges hopped list
+                    """
+                    if source_vertex == random_vertex:
+                        nodes_hopped.append(target_vertex)
+                    else:
+                        nodes_hopped.append(source_vertex)
+                    edges_hopped.append((source_vertex, target_vertex))
+                    edges_index_hopped.append(random_edge)
+
+                    valid_attributes["attributes"].append(new_graph.es[random_edge]["attributes"])
+
+                    source_name = new_graph.vs[source_vertex]["content"]
+                    target_name = new_graph.vs[target_vertex]["content"]
+
+                    print(f"随机选择的边: {random_edge}, "
+                          f"""{source_name} """
+                          f"""{edge_info.attributes()["attributes"][0]}"""
+                          f"""{target_name} """)
+                    chunks_found.add(edge_info.attributes()["chunks"][0])
+                    chunk = self.chunk_embedding_store.get_row(edge_info.attributes()["chunks"][0])
+                    if chunk not in chunks_list:
+                        chunks_list.append(chunk)
+                    facts_list.append([source_name, edge_info.attributes()["attributes"][0], target_name])
+                    # f"""chunk is {self.chunk_embedding_store.get_row(edge_info["chunks"][0]["hash_id"])}""")
+                    # print(f"对应的文章是 {}")
+                else:
+                    print(f"已经走到尽头了")
+                    break
+
+            result = {
+                "edges_hopped": edges_hopped,
+                "nodes_hopped": nodes_hopped,
+                "chunks": list(chunks_found),
+                "chunks_list": chunks_list,
+                "facts_list": facts_list,
+            }
+
+            new_nodes = {
+                "name": [new_graph.vs[node]["hash_id"] for node in nodes_hopped],
+                "content": [new_graph.vs[node]["content"] for node in nodes_hopped],
+            }
+            valid_edges = [(new_graph.vs[source_vertex]["hash_id"], new_graph.vs[target_vertex]["hash_id"])
+                           for (source_vertex, target_vertex) in edges_hopped]
+
+            print(f"最后选出的结果是 {result} new_nodes is {new_nodes}")
+            try:
+                os.makedirs(f"{save_directory}/multi_hop")
+            except Exception as E:
+                print("already exist.")
+            draw_graph(new_nodes, valid_edges, valid_attributes, index)
+            with open(f"{save_directory}/multi_hop/multi_hop_{index}.json", 'w', encoding='utf-8') as f:
+                json.dump(result, f, ensure_ascii=False, indent=4)
+
+            return True
+
+
+        questions_generated = 0
+        questions_total = 1
+        while questions_generated < questions_total:
+            if generate_multihop(questions_generated):
+                questions_generated += 1
+            print("try again.")
 
     def rag_qa(self,
                queries: List[str|QuerySolution],
@@ -690,12 +879,15 @@ class HippoRAG:
                 'Recall@200': 1.0}
        
                 """
-                print(f"mengyao_debug queries are {queries} overall_retrieval_result is {overall_retrieval_result}")
+                # print(f"mengyao_debug queries are {queries} overall_retrieval_result is {overall_retrieval_result}")
             else:
                 queries = self.retrieve(queries=queries)
 
         # Performing QA
         queries_solutions, all_response_message, all_metadata = self.qa(queries)
+        print(f"queries_solutions is {queries_solutions}")
+        print(f"all_response_message is {all_response_message}")
+        print(f"all_metadata is {all_metadata}")
 
         # Evaluating QA
         if gold_answers is not None:
@@ -1049,6 +1241,7 @@ class HippoRAG:
             if chunk_key not in current_graph_nodes:
                 for chunk_ent in chunk_triple_entities[idx]:
                     node_key = compute_mdhash_id(chunk_ent, prefix="entity-")
+
 
                     self.node_to_node_stats[(chunk_key, node_key)] = {
                         "weight": 1,
@@ -1510,7 +1703,7 @@ class HippoRAG:
         self.passage_embeddings = np.array(self.chunk_embedding_store.get_embeddings(self.passage_node_keys))
 
 
-        print(f"mengyao_debug fact_node_keys is {self.fact_node_keys}")
+        # print(f"mengyao_debug fact_node_keys is {self.fact_node_keys}")
         self.fact_embeddings = np.array(self.fact_embedding_store.get_embeddings(self.fact_node_keys))
 
         all_openie_info, chunk_keys_to_process = self.load_existing_openie([])
@@ -1758,6 +1951,10 @@ class HippoRAG:
         phrases_and_ids = set()
 
         print(f"mengyao_debug query_fact_scores is {query_fact_scores}")
+        print(f"mengyao_debug top_k_fact_indices is {top_k_fact_indices}")
+        print(f"mengyao_debug phrase_weights length is {len(phrase_weights)}")
+
+
 
         for rank, f in enumerate(top_k_facts):
             """
@@ -1766,9 +1963,12 @@ class HippoRAG:
             subject_phrase = f[0].lower()
             predicate_phrase = f[1].lower()
             object_phrase = f[2].lower()
-            ## score是通过 fact 和 query算出来的；
+            """
+            score是通过 fact 和 query算出来的；
+            """
             fact_score = query_fact_scores[
                 top_k_fact_indices[rank]] if query_fact_scores.ndim > 0 else query_fact_scores
+
 
             for phrase in [subject_phrase, object_phrase]:
                 phrase_key = compute_mdhash_id(
@@ -1777,18 +1977,34 @@ class HippoRAG:
                 )
                 phrase_id = self.node_name_to_vertex_idx.get(phrase_key, None)
 
+                print(f"mengyao_debug phrase is {phrase}")
+                print(f"mengyao_debug phrase_key is {phrase_key}")
+                print(f"mengyao_debug phrase_id is {phrase_id}")
+
                 if phrase_id is not None:
                     weighted_fact_score = fact_score
 
                     if len(self.ent_node_to_chunk_ids.get(phrase_key, set())) > 0:
+                        """
+                        如果一个phrase指向多篇文章，那这个entity对应的weighted_fact_score 权重要下降；
+                        """
                         weighted_fact_score /= len(self.ent_node_to_chunk_ids[phrase_key])
+                        print(f"mengyao_debug {phrase} weighted_fact_score "
+                              f"scale by {len(self.ent_node_to_chunk_ids[phrase_key])} "
+                              f"weighted_fact_score is {weighted_fact_score}")
+
 
                     phrase_weights[phrase_id] += weighted_fact_score
                     number_of_occurs[phrase_id] += 1
 
                 phrases_and_ids.add((phrase, phrase_id))
 
-        print(f"mengyao_debug phrases_and_ids are {phrases_and_ids}")
+        print(f"mengyao_debug phrases_and_ids are {phrases_and_ids}， "
+              f"phrase_weights is {phrase_weights}, number_of_occurs is {number_of_occurs}")
+
+
+        ##todo 这里好像有问题 稍微改一下
+        number_of_occurs[number_of_occurs == 0] = 1
 
         phrase_weights /= number_of_occurs
 
@@ -1804,7 +2020,12 @@ class HippoRAG:
 
         print(f"mengyao_debug phrase_scores is {phrase_scores}")
 
+
+        """
+        筛选高分
+        """
         if link_top_k:
+            print(f"mengyao_debug using link_top_k, phrase_weights is {phrase_weights}")
             phrase_weights, linking_score_map = self.get_top_k_weights(link_top_k,
                                                                            phrase_weights,
                                                                            linking_score_map)  # at this stage, the length of linking_scope_map is determined by link_top_k
@@ -1828,14 +2049,24 @@ class HippoRAG:
             passage_weights[passage_node_id] = passage_dpr_score * passage_node_weight
             passage_node_text = self.chunk_embedding_store.get_row(passage_node_key)["content"]
             linking_score_map[passage_node_text] = passage_dpr_score * passage_node_weight
+            print(f"passage_node_key is {passage_node_key}\n"
+                  f"passage_dpr_score is {passage_dpr_score}\n"
+                  f"passage_node_id is {passage_node_id}\n"
+                  f"passage_node_text is {passage_node_text}\n"
+                  f"passage_dpr_score is {passage_dpr_score}\n")
 
         #Combining phrase and passage scores into one array for PPR
         """
-        把两个加起来了
+        把两个加起来了，但是是两个列表，每个点代表了一个vertex，他可以是phrase（主语宾语）也可以是chunk（文章）
         """
-        print(f"mengyao_debug phrase_weights are {phrase_weights}")
-        print(f"mengyao_debug passage_weights are {passage_weights}")
         node_weights = phrase_weights + passage_weights
+
+        non_zero_indices = np.nonzero(node_weights)[0]
+        for idx in non_zero_indices:
+            print(f"""mengyao_debug 索引 {idx}: 
+            权重 = {node_weights[idx]:.6f}，
+            节点 {self.graph.vs[idx]["content"][:15]}""")
+
 
         #Recording top 30 facts in linking_score_map
         if len(linking_score_map) > 30:
@@ -1909,6 +2140,9 @@ class HippoRAG:
                   f"candidate_facts is {candidate_facts}")
             
             # Rerank the facts
+            """
+            用大模型对facts进行排序；
+            """
             top_k_fact_indices, top_k_facts, reranker_dict = self.rerank_filter(query,
                                                                                 candidate_facts,
                                                                                 candidate_fact_indices,

@@ -56,7 +56,9 @@ def text_processing(text):
         return [text_processing(t) for t in text]
     if not isinstance(text, str):
         text = str(text)
-    return re.sub('[^A-Za-z0-9 ]', ' ', text.lower()).strip()
+    #todo @mengyao this is for chinese
+    return text
+    # return re.sub('[^A-Za-z0-9 ]', ' ', text.lower()).strip()
 
 def reformat_openie_results(corpus_openie_results) -> (Dict[str, NerRawOutput], Dict[str, TripleRawOutput]):
 
