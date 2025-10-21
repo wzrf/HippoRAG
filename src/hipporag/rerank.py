@@ -93,6 +93,7 @@ class DSPyFilter:
 
         self.default_gen_kwargs['max_completion_tokens'] = 512
 
+        print(f"[llm_call] messages is {messages}")
         response = self.llm_infer_fn(
             messages=messages,
             model=self.model_name,

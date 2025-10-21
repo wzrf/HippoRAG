@@ -42,7 +42,7 @@ class PromptTemplateManager:
         # abs path to dir where each *.py file (exclude __init__.py) contains a variable prompt_template (a str or a chat history with content as raw str for being converted to a Template)
         self.templates_dir = os.path.join(package_dir, "templates") 
 
-        print(f"mengyao_debug initing template {self.templates_dir}")
+        # print(f"mengyao_debug initing template {self.templates_dir}")
 
         self._load_templates()
 

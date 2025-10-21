@@ -94,7 +94,7 @@ class EmbeddingStore:
         mengyao_debug texts_to_encode is ["Erik Hort's is a football player"], 
         missing_ids is ['chunk-665eba1d3aac5338ae36cadb8a7fd6df']
         """
-        print(f"mengyao_debug texts_to_encode is {texts_to_encode}, missing_ids is {missing_ids}")
+        # print(f"mengyao_debug texts_to_encode is {texts_to_encode}, missing_ids is {missing_ids}")
 
         missing_embeddings = self.embedding_model.batch_encode(texts_to_encode)
 

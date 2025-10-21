@@ -45,7 +45,7 @@ class OpenIE:
     def ner(self, chunk_key: str, passage: str) -> NerRawOutput:
         # PREPROCESSING
         ner_input_message = self.prompt_template_manager.render(name='ner', passage=passage)
-        print(f"mengyao_debug ner_input_message is {ner_input_message}")
+        # print(f"mengyao_debug ner_input_message is {ner_input_message}")
         raw_response = ""
         metadata = {}
         try:
@@ -64,7 +64,7 @@ class OpenIE:
             """
             mengyao_debug extracted_entities is ['Erik Hort'] unique_entities is ['Erik Hort']
             """
-            print(f"mengyao_debug extracted_entities is {extracted_entities} unique_entities is {unique_entities}")
+            # print(f"mengyao_debug extracted_entities is {extracted_entities} unique_entities is {unique_entities}")
 
         except Exception as e:
             print(f"mengyao_debug failed to extract entities, exception is {e}")
@@ -101,7 +101,7 @@ class OpenIE:
             named_entity_json=json.dumps({"named_entities": named_entities})
         )
 
-        print(f"mengyao_debug triple_extraction querying LLM using messages {messages}")
+        # print(f"mengyao_debug triple_extraction querying LLM using messages {messages}")
 
         raw_response = ""
         metadata = {}
@@ -117,10 +117,10 @@ class OpenIE:
                 real_response = raw_response
             extracted_triples = _extract_triples_from_response(real_response)
             triplets = filter_invalid_triples(triples=extracted_triples)
-            print(f"mengyao_debug triple_extraction \n"
-                  f"passage is {passage}\n"
-                  f"extracted_triples are {extracted_triples}\n"
-                  f"triplets are {triplets}\n")
+            # print(f"mengyao_debug triple_extraction \n"
+            #       f"passage is {passage}\n"
+            #       f"extracted_triples are {extracted_triples}\n"
+            #       f"triplets are {triplets}\n")
 
             """
             mengyao_debug triple_extraction

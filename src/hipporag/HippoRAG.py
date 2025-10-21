@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Union, Optional, List, Set, Dict, Any, Tuple, Literal
 import numpy as np
 import random
+import glob
 import importlib
 from collections import defaultdict
 from transformers import HfArgumentParser
@@ -17,6 +18,7 @@ import numpy as np
 from collections import defaultdict
 import re
 import time
+from copy import deepcopy
 
 from .llm import _get_llm_class, BaseLLM
 from .embedding_model import _get_embedding_model_class, BaseEmbeddingModel
@@ -34,8 +36,10 @@ from .utils.misc_utils import NerRawOutput, TripleRawOutput
 from .utils.embed_utils import retrieve_knn
 from .utils.typing import Triple
 from .utils.config_utils import BaseConfig
+from .utils.llm_utils import fix_broken_generated_json
 
 logger = logging.getLogger(__name__)
+
 
 class HippoRAG:
 
@@ -47,7 +51,8 @@ class HippoRAG:
                  embedding_model_name=None,
                  embedding_base_url=None,
                  azure_endpoint=None,
-                 azure_embedding_endpoint=None):
+                 azure_embedding_endpoint=None,
+                 llm_model_name_deepthink=None):
         """
         Initializes an instance of the class and its related components.
 
@@ -90,7 +95,7 @@ class HippoRAG:
         else:
             self.global_config = global_config
 
-        #Overwriting Configuration if Specified
+        # Overwriting Configuration if Specified
         if save_dir is not None:
             self.global_config.save_dir = save_dir
 
@@ -115,7 +120,7 @@ class HippoRAG:
         _print_config = ",\n  ".join([f"{k} = {v}" for k, v in asdict(self.global_config).items()])
         logger.info(f"HippoRAG init with config:\n  {_print_config}\n")
 
-        #LLM and embedding model specific working directories are created under every specified saving directories
+        # LLM and embedding model specific working directories are created under every specified saving directories
         llm_label = self.global_config.llm_name.replace("/", "_")
         embedding_label = self.global_config.embedding_model_name.replace("/", "_")
         self.working_dir = os.path.join(self.global_config.save_dir, f"{llm_label}_{embedding_label}")
@@ -126,11 +131,17 @@ class HippoRAG:
 
         self.llm_model: BaseLLM = _get_llm_class(self.global_config)
 
+        if llm_model_name_deepthink is not None:
+            global_config_copy = deepcopy(self.global_config)
+            global_config_copy.llm_name = llm_model_name_deepthink
+            global_config_copy.max_new_tokens = 4096  ## give this a bigger quota
+            self.llm_model_deepthink: BaseLLM = _get_llm_class(global_config_copy)
+
         if self.global_config.openie_mode == 'online':
             self.openie = OpenIE(llm_model=self.llm_model)
         elif self.global_config.openie_mode == 'offline':
             self.openie = VLLMOfflineOpenIE(self.global_config)
-        elif self.global_config.openie_mode ==  'Transformers-offline':
+        elif self.global_config.openie_mode == 'Transformers-offline':
             self.openie = TransformersOfflineOpenIE(self.global_config)
 
         """
@@ -156,20 +167,22 @@ class HippoRAG:
                                                    os.path.join(self.working_dir, "fact_embeddings"),
                                                    self.global_config.embedding_batch_size, 'fact')
 
-        self.prompt_template_manager = PromptTemplateManager(role_mapping={"system": "system", "user": "user", "assistant": "assistant"})
+        self.prompt_template_manager = PromptTemplateManager(
+            role_mapping={"system": "system", "user": "user", "assistant": "assistant"})
 
-        self.openie_results_path = os.path.join(self.global_config.save_dir,f'openie_results_ner_{self.global_config.llm_name.replace("/", "_")}.json')
+        self.openie_results_path = os.path.join(self.global_config.save_dir,
+                                                f'openie_results_ner_{self.global_config.llm_name.replace("/", "_")}.json')
 
         self.rerank_filter = DSPyFilter(self)
 
         self.ready_to_retrieve = False
 
         self.ppr_time = 0
+        self.final_sort_results = []
         self.rerank_time = 0
         self.all_retrieval_time = 0
 
         self.ent_node_to_chunk_ids = None
-
 
     def initialize_graph(self):
         """
@@ -204,17 +217,17 @@ class HippoRAG:
             )
             return preloaded_graph
 
-    def pre_openie(self,  docs: List[str]):
+    def pre_openie(self, docs: List[str]):
         logger.info(f"Indexing Documents")
         logger.info(f"Performing OpenIE Offline")
 
         chunks = self.chunk_embedding_store.get_missing_string_hash_ids(docs)
 
         all_openie_info, chunk_keys_to_process = self.load_existing_openie(chunks.keys())
-        new_openie_rows = {k : chunks[k] for k in chunk_keys_to_process}
+        new_openie_rows = {k: chunks[k] for k in chunk_keys_to_process}
 
         if len(chunk_keys_to_process) > 0:
-            print(f"mengyao_debug doing batch_openie\n")
+            # print(f"mengyao_debug doing batch_openie\n")
             new_ner_results_dict, new_triple_results_dict = self.openie.batch_openie(new_openie_rows)
             self.merge_openie_results(all_openie_info, new_openie_rows, new_ner_results_dict, new_triple_results_dict)
 
@@ -254,16 +267,14 @@ class HippoRAG:
         chunk_to_rows = self.chunk_embedding_store.get_all_id_to_rows()
 
         all_openie_info, chunk_keys_to_process = self.load_existing_openie(chunk_to_rows.keys())
-        new_openie_rows = {k : chunk_to_rows[k] for k in chunk_keys_to_process}
+        new_openie_rows = {k: chunk_to_rows[k] for k in chunk_keys_to_process}
+
+        print(f"mengyao_debug all_openie_info is {all_openie_info}")
+        print(f"mengyao_debug chunk_keys_to_process is {chunk_keys_to_process}")
+        print(f"mengyao_debug new_openie_rows is {new_openie_rows}")
 
         ### 查询 triplets
         if len(chunk_keys_to_process) > 0:
-            """
-            mengyao_debug new_openie_rows is 
-            {'chunk-665eba1d3aac5338ae36cadb8a7fd6df': 
-            {'hash_id': 'chunk-665eba1d3aac5338ae36cadb8a7fd6df', 'content': "Erik Hort's is a football player"}
-            }
-            """
             print(f"mengyao_debug new_openie_rows is {new_openie_rows}")
             new_ner_results_dict, new_triple_results_dict = self.openie.batch_openie(new_openie_rows)
             self.merge_openie_results(all_openie_info, new_openie_rows, new_ner_results_dict, new_triple_results_dict)
@@ -271,18 +282,18 @@ class HippoRAG:
         if self.global_config.save_openie:
             self.save_openie_results(all_openie_info)
 
-
         ner_results_dict, triple_results_dict = reformat_openie_results(all_openie_info)
         print(f"mengyao_debug ner_results_dict is {ner_results_dict}")
         print(f"mengyao_debug triple_results_dict is {triple_results_dict}")
 
-        assert len(chunk_to_rows) == len(ner_results_dict) == len(triple_results_dict), f"len(chunk_to_rows): {len(chunk_to_rows)}, len(ner_results_dict): {len(ner_results_dict)}, len(triple_results_dict): {len(triple_results_dict)}"
+        assert len(chunk_to_rows) == len(ner_results_dict) == len(
+            triple_results_dict), f"len(chunk_to_rows): {len(chunk_to_rows)}, len(ner_results_dict): {len(ner_results_dict)}, len(triple_results_dict): {len(triple_results_dict)}"
 
         # prepare data_store
         chunk_ids = list(chunk_to_rows.keys())
 
         chunk_triples = [[text_processing(t) for t in triple_results_dict[chunk_id].triples] for chunk_id in chunk_ids]
-        # print(f"mengyao_debug chunk_triples is {chunk_triples}")
+        print(f"mengyao_debug chunk_triples is {chunk_triples}")
         entity_nodes, chunk_triple_entities = extract_entity_nodes(chunk_triples)
         facts = flatten_facts(chunk_triples)
 
@@ -291,24 +302,11 @@ class HippoRAG:
               f"facts is {facts}")
 
         logger.info(f"Encoding Entities")
-        """
-        ['cinderella', 'erik hort', 'football player', 'george rankin', 'marina', 
-        'minsk', 'montebello', 'oliver badman', 'politician', 'prince', 'rockland county', 
-        'royal ball', 'slipper', 'the kingdom', 'the lost glass slipper', 'the prince', 'thomas marwick']
-        """
+
         self.entity_embedding_store.insert_strings(entity_nodes)
 
         logger.info(f"Encoding Facts")
-        """
-        facts:
-        ["('erik hort', 'is a', 'football player')", "('oliver badman', 'is a', 'politician')", 
-        "('slipper', 'fit perfectly', 'cinderella')", "('erik hort', 'birthplace', 'montebello')", 
-        "('cinderella', 'attended', 'royal ball')", "('the prince', 'searched', 'the kingdom')", 
-        "('thomas marwick', 'is a', 'politician')", "('montebello', 'is part of', 'rockland county')",
-         "('george rankin', 'is a', 'politician')", "('montebello', 'located in', 'rockland county')", 
-         "('the prince', 'used', 'the lost glass slipper')", "('cinderella', 'was reunited with', 'prince')", 
-         "('marina', 'born in', 'minsk')"]
-        """
+
         self.fact_embedding_store.insert_strings([str(fact) for fact in facts])
 
         logger.info(f"Constructing Graph")
@@ -342,18 +340,18 @@ class HippoRAG:
                 A list of documents to be deleted.
         """
 
-        #Making sure that all the necessary structures have been built.
+        # Making sure that all the necessary structures have been built.
         if not self.ready_to_retrieve:
             self.prepare_retrieval_objects()
 
         current_docs = set(self.chunk_embedding_store.get_all_texts())
         docs_to_delete = [doc for doc in docs_to_delete if doc in current_docs]
 
-        #Get ids for chunks to delete
+        # Get ids for chunks to delete
         chunk_ids_to_delete = set(
             [self.chunk_embedding_store.text_to_hash_id[chunk] for chunk in docs_to_delete])
 
-        #Find triples in chunks to delete
+        # Find triples in chunks to delete
         all_openie_info, chunk_keys_to_process = self.load_existing_openie([])
         triples_to_delete = []
 
@@ -367,7 +365,7 @@ class HippoRAG:
 
         triples_to_delete = flatten_facts(triples_to_delete)
 
-        #Filter out triples that appear in unaltered chunks
+        # Filter out triples that appear in unaltered chunks
         true_triples_to_delete = []
 
         for triple in triples_to_delete:
@@ -384,9 +382,10 @@ class HippoRAG:
         entities_to_delete, _ = extract_entity_nodes(processed_true_triples_to_delete)
         processed_true_triples_to_delete = flatten_facts(processed_true_triples_to_delete)
 
-        triple_ids_to_delete = set([self.fact_embedding_store.text_to_hash_id[str(triple)] for triple in processed_true_triples_to_delete])
+        triple_ids_to_delete = set(
+            [self.fact_embedding_store.text_to_hash_id[str(triple)] for triple in processed_true_triples_to_delete])
 
-        #Filter out entities that appear in unaltered chunks
+        # Filter out entities that appear in unaltered chunks
         ent_ids_to_delete = [self.entity_embedding_store.text_to_hash_id[ent] for ent in entities_to_delete]
 
         filtered_ent_ids_to_delete = []
@@ -409,7 +408,7 @@ class HippoRAG:
         self.fact_embedding_store.delete(triple_ids_to_delete)
         self.chunk_embedding_store.delete(chunk_ids_to_delete)
 
-        #Delete Nodes from Graph
+        # Delete Nodes from Graph
         self.graph.delete_vertices(list(filtered_ent_ids_to_delete) + list(chunk_ids_to_delete))
         self.save_igraph()
 
@@ -418,7 +417,10 @@ class HippoRAG:
     def retrieve(self,
                  queries: List[str],
                  num_to_retrieve: int = None,
-                 gold_docs: List[List[str]] = None) -> List[QuerySolution] | Tuple[List[QuerySolution], Dict]:
+                 gold_docs: List[List[str]] = None,
+                 gold_chunk_id: str = "",
+                 all_gold_chunk_ids: List[str] = None) -> List[QuerySolution] | Tuple[
+        List[QuerySolution], Dict, Dict, Dict, List, List, List]:
         """
         Performs retrieval using the HippoRAG 2 framework, which consists of several steps:
         - Fact Retrieval
@@ -457,12 +459,13 @@ class HippoRAG:
         if not self.ready_to_retrieve:
             self.prepare_retrieval_objects()
 
-
         """
         对query进行 embedding
         """
         self.get_query_embeddings(queries)
 
+        retrieval_results_dpr = []
+        retrieval_results_dpr_plus = []
         retrieval_results = []
 
         for q_idx, query in tqdm(enumerate(queries), desc="Retrieving", total=len(queries)):
@@ -483,63 +486,155 @@ class HippoRAG:
              0.09769077 0.16271761 0.12138226]
             , top_k_facts is [('cinderella', 'was reunited with', 'prince'), ('cinderella', 'attended', 'royal ball'), ('slipper', 'fit perfectly', 'cinderella'), ('the prince', 'used', 'the lost glass slipper'), ('the prince', 'searched', 'the kingdom')]
             """
-            print(f"mengyao_debug for query {query}\n, "
-                  f"query_fact_scores is {query_fact_scores}\n,"
-                  f" top_k_facts is {top_k_facts}\n")
+            # print(f"mengyao_debug for query {query}\n, "
+            #       f"query_fact_scores is {query_fact_scores}\n,"
+            #       f" top_k_facts is {top_k_facts}\n")
 
             self.rerank_time += rerank_end - rerank_start
 
             if len(top_k_facts) == 0:
                 logger.info('No facts found after reranking, return DPR results')
                 sorted_doc_ids, sorted_doc_scores = self.dense_passage_retrieval(query)
+                ##todo mengyao 这里只是为了暂时避免warning
+                dpr_sorted_doc_ids = sorted_doc_ids
+                dpr_sorted_doc_scores = sorted_doc_scores
+                dpr_plus_sorted_doc_ids = sorted_doc_ids
+                dpr_plus_sorted_doc_scores = sorted_doc_scores
             else:
                 """
                 使用找到的fact 去搜索对应的doc
                 """
-                sorted_doc_ids, sorted_doc_scores = self.graph_search_with_fact_entities(query=query,
-                                                                                         link_top_k=self.global_config.linking_top_k,
-                                                                                         query_fact_scores=query_fact_scores,
-                                                                                         top_k_facts=top_k_facts,
-                                                                                         top_k_fact_indices=top_k_fact_indices,
-                                                                                         passage_node_weight=self.global_config.passage_node_weight)
+                dpr_sorted_doc_ids, dpr_sorted_doc_scores, dpr_plus_sorted_doc_ids, dpr_plus_sorted_doc_scores, sorted_doc_ids, sorted_doc_scores = self.graph_search_with_fact_entities(
+                    query=query,
+                    link_top_k=self.global_config.linking_top_k,
+                    query_fact_scores=query_fact_scores,
+                    top_k_facts=top_k_facts,
+                    top_k_fact_indices=top_k_fact_indices,
+                    passage_node_weight=self.global_config.passage_node_weight,
+                    all_gold_docs=gold_docs[q_idx])
 
             print(f"num_to_retrieve top is {num_to_retrieve}")
             top_k_docs_hash = [self.passage_node_keys[idx] for idx in sorted_doc_ids[:num_to_retrieve]]
-            top_k_docs = [self.chunk_embedding_store.get_row(self.passage_node_keys[idx])["content"] for idx in sorted_doc_ids[:num_to_retrieve]]
+            top_k_docs = [self.chunk_embedding_store.get_row(self.passage_node_keys[idx])["content"] for idx in
+                          sorted_doc_ids[:num_to_retrieve]]
 
-            print(f"top_k_docs is {top_k_docs}")
-            print(f"top_k_docs_hash is {top_k_docs_hash}")
+            top_k_docs_dpr = [self.chunk_embedding_store.get_row(self.passage_node_keys[idx])["content"] for idx in
+                              dpr_sorted_doc_ids[:num_to_retrieve]]
+            top_k_docs_dpr_plus = [self.chunk_embedding_store.get_row(self.passage_node_keys[idx])["content"] for idx in
+                                   dpr_plus_sorted_doc_ids[:num_to_retrieve]]
 
-            retrieval_results.append(QuerySolution(question=query, docs=top_k_docs, doc_scores=sorted_doc_scores[:num_to_retrieve]))
+            # print(f"top_k_docs is {top_k_docs}")
+            # print(f"top_k_docs_hash is {top_k_docs_hash}")
+
+            retrieval_results.append(
+                QuerySolution(question=query, docs=top_k_docs, doc_scores=sorted_doc_scores[:num_to_retrieve]))
+            retrieval_results_dpr.append(
+                QuerySolution(question=query, docs=top_k_docs_dpr, doc_scores=dpr_sorted_doc_scores[:num_to_retrieve]))
+            retrieval_results_dpr_plus.append(
+                QuerySolution(question=query, docs=top_k_docs_dpr_plus,
+                              doc_scores=dpr_plus_sorted_doc_scores[:num_to_retrieve]))
 
         retrieve_end_time = time.time()  # Record end time
 
         self.all_retrieval_time += retrieve_end_time - retrieve_start_time
 
-        logger.info(f"Total Retrieval Time {self.all_retrieval_time:.2f}s")
-        logger.info(f"Total Recognition Memory Time {self.rerank_time:.2f}s")
-        logger.info(f"Total PPR Time {self.ppr_time:.2f}s")
-        logger.info(f"Total Misc Time {self.all_retrieval_time - (self.rerank_time + self.ppr_time):.2f}s")
+        print(f"Total Retrieval Time {self.all_retrieval_time:.2f}s")
+        print(f"Total Recognition Memory Time {self.rerank_time:.2f}s")
+        print(f"Total PPR Time {self.ppr_time:.2f}s")
+        print(f"Total Misc Time {self.all_retrieval_time - (self.rerank_time + self.ppr_time):.2f}s")
 
         # Evaluate retrieval
         if gold_docs is not None:
             k_list = [1, 2, 5, 10, 20, 30, 50, 100, 150, 200]
-            overall_retrieval_result, example_retrieval_results = retrieval_recall_evaluator.calculate_metric_scores(gold_docs=gold_docs, retrieved_docs=[retrieval_result.docs for retrieval_result in retrieval_results], k_list=k_list)
-            logger.info(f"Evaluation results for retrieval: {overall_retrieval_result}")
-
-            return retrieval_results, overall_retrieval_result
+            dpr_overall_retrieval_result, dpr_example_retrieval_results = (
+                retrieval_recall_evaluator.calculate_metric_scores(gold_docs=gold_docs,
+                                                                   retrieved_docs=[retrieval_result_dpr.docs for
+                                                                                   retrieval_result_dpr in
+                                                                                   retrieval_results_dpr],
+                                                                   k_list=k_list))
+            print(
+                f"Evaluation results for DPR retrieval: {dpr_overall_retrieval_result}, dpr_example_retrieval_results is {dpr_example_retrieval_results}")
+            dpr_plus_overall_retrieval_result, dpr_plus_example_retrieval_results = (
+                retrieval_recall_evaluator.calculate_metric_scores(gold_docs=gold_docs,
+                                                                   retrieved_docs=[retrieval_result_dpr.docs for
+                                                                                   retrieval_result_dpr in
+                                                                                   retrieval_results_dpr_plus],
+                                                                   k_list=k_list))
+            print(
+                f"Evaluation results for DPR Plus retrieval: {dpr_plus_overall_retrieval_result}, dpr_example_retrieval_results is {dpr_plus_example_retrieval_results}")
+            overall_retrieval_result, example_retrieval_results = (
+                retrieval_recall_evaluator.calculate_metric_scores(gold_docs=gold_docs,
+                                                                   retrieved_docs=[retrieval_result.docs for
+                                                                                   retrieval_result in
+                                                                                   retrieval_results], k_list=k_list))
+            print(
+                f"Evaluation results for PPR retrieval: {overall_retrieval_result}, example_retrieval_results is {example_retrieval_results}")
+            return (retrieval_results, overall_retrieval_result, dpr_overall_retrieval_result,
+                    dpr_plus_overall_retrieval_result,
+                    example_retrieval_results, dpr_example_retrieval_results, dpr_plus_example_retrieval_results)
         else:
             return retrieval_results
 
+    def raise_question(self, multi_hop_result: dict, save_directory: str, index: int):
+        """
+        step 1: let the LLM extract all facts.
+        """
+        chunks_list = multi_hop_result["chunks_list"]
+        fact_extract_prompt = self.prompt_template_manager.render(name='fact_extract', passage=chunks_list)
+        print(f"mengyao_debug fact_extract_prompt is {fact_extract_prompt}")
+        raw_response, metadata, cache_hit = self.llm_model.infer(fact_extract_prompt)
+        if metadata['finish_reason'] == 'length':
+            real_response = fix_broken_generated_json(raw_response)
+        else:
+            real_response = raw_response
+        print(f"fact extract raw_response is {real_response}")
+        question_generation_prompt = self.prompt_template_manager.render(name='question_generation',
+                                                                         passage=real_response)
+        raw_response, metadata, cache_hit = self.llm_model_deepthink.infer(question_generation_prompt)
+        if metadata['finish_reason'] == 'length':
+            question_generated = fix_broken_generated_json(raw_response)
+        else:
+            question_generated = raw_response
 
-    def do_some_tests(self, save_directory: str):
+        print(f"question_generated is {question_generated}")
 
+        question_finetuning_prompt = self.prompt_template_manager.render(name='question_finetuning',
+                                                                         passage=question_generated)
+        raw_response, metadata, cache_hit = self.llm_model.infer(question_finetuning_prompt)
+        if metadata['finish_reason'] == 'length':
+            question_finetuned = fix_broken_generated_json(raw_response)
+        else:
+            question_finetuned = raw_response
+
+        question_finetuned = question_finetuned.replace("```json", "").replace("```", "").strip()
+        question_finetuned_json = json.loads(question_finetuned)
+        print(f"question_finetuned is {question_finetuned}")
+        if question_finetuned_json["keep"] == False:
+            print(f"mengyao_debug question is dumped, output is {question_finetuned_json}")
+        else:
+            print(f"mengyao_debug question is kept, output is {question_finetuned_json}")
+
+            question_rate_prompt = self.prompt_template_manager.render(name='question_rate', passage=question_finetuned)
+            raw_response, metadata, cache_hit = self.llm_model_deepthink.infer(question_rate_prompt)
+            if metadata['finish_reason'] == 'length':
+                question_rate = fix_broken_generated_json(raw_response)
+            else:
+                question_rate = raw_response
+            question_rate = question_rate.replace("```json", "").replace("```", "").strip()
+            question_rate_json = json.loads(question_rate)
+            print(f"question_rate_json is {question_rate_json}")
+            merged_result = {**question_rate_json, **question_finetuned_json}
+            merged_result["chunks_list"] = chunks_list
+            with open(f"{save_directory}/multi_hop/multi_hop_question_{index}.json", 'w', encoding='utf-8') as f:
+                json.dump(merged_result, f, ensure_ascii=False, indent=4)
+
+    def build_graph_and_raise_question(self, save_directory: str, questions_total=1):
         new_graph = self.graph.copy()
 
-        print(f"mengyao_debug entity_embedding_store are {self.entity_embedding_store.get_all_id_to_rows()}")
-        print(f"mengyao_debug fact_embedding_store are {self.fact_embedding_store.get_all_id_to_rows()}")
-        print(f"mengyao_debug chunk_embedding_store are {self.chunk_embedding_store.get_all_id_to_rows()}")
-        print(f"""mengyao_debug self.graph.vs["name"] are {self.graph.vs["name"]}""")
+        # print(f"mengyao_debug entity_embedding_store are {self.entity_embedding_store.get_all_id_to_rows()}")
+        # print(f"mengyao_debug fact_embedding_store are {self.fact_embedding_store.get_all_id_to_rows()}")
+        # print(f"mengyao_debug chunk_embedding_store are {self.chunk_embedding_store.get_all_id_to_rows()}")
+        # print(f"""mengyao_debug self.graph.vs["name"] are {self.graph.vs["name"]}""")
 
         vertices = new_graph.vs
         print("所有顶点:", vertices["name"])
@@ -571,7 +666,6 @@ class HippoRAG:
             new_graph.delete_edges(edge_index)
             # print(f"已删除边索引 {edge_index}")
 
-
         # 再删除chunk点，防止图太乱：
         vertices_to_remove = []
 
@@ -590,7 +684,6 @@ class HippoRAG:
                 # print(f"已删除顶点索引 {vertex_index}")
         else:
             print("\n没有找到标签包含'chunk'的顶点")
-
 
         passages_summary = ""
         all_fact_set = set()
@@ -617,7 +710,6 @@ class HippoRAG:
         print(f"""passages_summary is {all_fact_set}""")
         print(f"""top_10 is {top_10}""")
 
-
         all_vertices_names = []
         for name in new_graph.vs["name"]:
             if "chunk" in name:
@@ -627,28 +719,6 @@ class HippoRAG:
         ig.config["plotting.backend"] = "matplotlib"
         import matplotlib.pyplot as plt
         plt.rcParams['font.sans-serif'] = ['SimHei']  # 用来正常显示中文标签
-        # ig.plot(new_graph,
-        #      # 顶点大小和颜色
-        #      vertex_size=20,  # 顶点大小
-        #      vertex_color="lightblue",  # 顶点颜色
-        #      vertex_frame_color="black",  # 顶点边框颜色
-        #      vertex_frame_width=1,  # 顶点边框宽度
-        #
-        #      # 标签设置
-        #      vertex_label= all_vertices_names,
-        #      vertex_label_size=8,  # 标签字体大小
-        #      vertex_label_color="black",  # 标签颜色
-        #      vertex_label_dist=1,  # 标签与顶点的距离
-        #      vertex_label_family="sans-serif",  # 字体
-        #
-        #      edge_label=new_graph.es["attributes"],
-        #      edge_label_size=8,  # 标签字体大小
-        #
-        #      # 顶点形状
-        #      vertex_shape="circle"  # 顶点形状：circle, square, triangle, etc.
-        #      )
-
-        # plt.show()
 
         def not_fully_contains(current: list, to_be_chosen: list) -> bool:
             for entities in to_be_chosen:
@@ -698,26 +768,49 @@ class HippoRAG:
             plt.close()
             print(f"mengyao_debug draw_graph graph is {graph}")
 
+        def find_max_index_glob(folder_path):
+            # 使用glob模式匹配文件
+            pattern = os.path.join(folder_path, "multi_hop_question_*.json")
+            files = glob.glob(pattern)
+
+            if not files:
+                return None
+
+            # 提取数字并找到最大值
+            indices = []
+            for file_path in files:
+                filename = os.path.basename(file_path)
+                match = re.match(r"multi_hop_question_(\d+)\.json", filename)
+                if match:
+                    indices.append(int(match.group(1)))
+
+            return max(indices) if indices else None
+
         def generate_multihop(index: int) -> bool:
-            nodes_no_hop = set()
+            node_without_usable_edges = set()
             chunks_found = set()
             chunks_list = []
-            nodes_hopped = [] ## (a, b)
-            edges_index_hopped = [] ## just index
+            nodes_hopped = []  ## (a, b)
+            edges_index_hopped = []  ## just index
             edges_hopped = []
             valid_attributes = {
                 "attributes": []
             }
             facts_list = []
-            total_hop = 30
-            total_chunks = 20
+            total_hop = 15
+            total_chunks = 10
+            """
+            为了防止一个节点作为起跳点太多次；如果他作为起跳点4次以上，则不让他再跳；
+            """
+            total_jump_allowed_from_a_vertex = 4
+            vertex_as_start_of_jump = {}
             ## 开始multihop
             ## 假设是5跳：
             vertex_ids = [v.index for v in new_graph.vs]  # 获取所有顶点ID
             initial_vertex = random.choice(vertex_ids)
             nodes_hopped.append(initial_vertex)
-            while len(chunks_found)<total_chunks or len(edges_hopped) < total_hop:
-                random_vertex = get_next_hop(nodes_hopped, nodes_no_hop)
+            while len(chunks_found) < total_chunks or len(edges_hopped) < total_hop:
+                random_vertex = get_next_hop(nodes_hopped, node_without_usable_edges)
                 if random_vertex == -1:
                     print(f"跳不下去了，结束！")
                     return False
@@ -730,7 +823,8 @@ class HippoRAG:
                     random_edge = random.choice(incident_edges)
                     """
                     如果这条边存在了就不要再走了；
-                    但是跳转到一个已经存在的点是被允许的，因为允许成环；
+                    
+                    我们先不允许成环
                     """
                     if random_edge in edges_index_hopped:
                         if not_fully_contains(edges_index_hopped, incident_edges):
@@ -738,16 +832,35 @@ class HippoRAG:
                             continue
                         else:
                             ## 这个点的所有边都已经被选择过了，这个点已经不能再跳了必须回头了
-                            nodes_no_hop.add(random_vertex)
+                            node_without_usable_edges.add(random_vertex)
                             print(f"没有可跳的方向了，回头")
                             continue
 
                     edge_info = new_graph.es[random_edge]
                     source_vertex = edge_info.source
                     target_vertex = edge_info.target
+
+                    if target_vertex in nodes_hopped:
+                        """
+                        如果发现成环了，也不可以；把这条边列为已经跳过的，不允许再跳；
+                        """
+                        edges_index_hopped.append(random_edge)
+                        if not_fully_contains(edges_index_hopped, incident_edges):
+                            print(f"【成环】这条边已经走过了，重试")
+                            continue
+                        else:
+                            ## 这个点的所有边都已经被选择过了，这个点已经不能再跳了必须回头了
+                            node_without_usable_edges.add(random_vertex)
+                            print(f"【成环】没有可跳的方向了，回头")
+                            continue
+
                     """
+                    可以跳了
                     add vertex and edges to the nodes and edges hopped list
                     """
+                    vertex_as_start_of_jump[random_vertex] = vertex_as_start_of_jump.get(random_vertex, 0) + 1
+                    if vertex_as_start_of_jump[random_vertex] >= total_jump_allowed_from_a_vertex:
+                        node_without_usable_edges.add(random_vertex)
                     if source_vertex == random_vertex:
                         nodes_hopped.append(target_vertex)
                     else:
@@ -795,24 +908,35 @@ class HippoRAG:
                 os.makedirs(f"{save_directory}/multi_hop")
             except Exception as E:
                 print("already exist.")
-            draw_graph(new_nodes, valid_edges, valid_attributes, index)
-            with open(f"{save_directory}/multi_hop/multi_hop_{index}.json", 'w', encoding='utf-8') as f:
+            index_save = find_max_index_glob(f"{save_directory}/multi_hop") + 1
+            print(f"save to index {index_save}")
+            try:
+                draw_graph(new_nodes, valid_edges, valid_attributes, index_save)
+            except Exception as E:
+                print(f"fail to draw a picture, reason is {E}")
+            with open(f"{save_directory}/multi_hop/multi_hop_{index_save}.json", 'w', encoding='utf-8') as f:
                 json.dump(result, f, ensure_ascii=False, indent=4)
+
+            ## raise a question
+            self.raise_question(multi_hop_result=result, save_directory=save_directory, index=index_save)
 
             return True
 
-
         questions_generated = 0
-        questions_total = 1
         while questions_generated < questions_total:
             if generate_multihop(questions_generated):
                 questions_generated += 1
-            print("try again.")
+            else:
+                print("try again.")
 
     def rag_qa(self,
-               queries: List[str|QuerySolution],
+               queries: List[str | QuerySolution],
                gold_docs: List[List[str]] = None,
-               gold_answers: List[List[str]] = None) -> Tuple[List[QuerySolution], List[str], List[Dict]] | Tuple[List[QuerySolution], List[str], List[Dict], Dict, Dict]:
+               gold_answers: List[List[str]] = None,
+               gold_chunk_id: str = "",
+               all_gold_chunk_ids: List[str] = None) -> (
+            Tuple[List[QuerySolution], List[str], List[Dict], Dict, Dict, Dict, Dict] | Tuple[
+        List[QuerySolution], List[str], List[Dict], Dict, Dict, Dict, Dict, Dict]):
         """
         Performs retrieval-augmented generation enhanced QA using the HippoRAG 2 framework.
 
@@ -853,38 +977,27 @@ class HippoRAG:
             if gold_docs is not None:
                 print(f"mengyao_debug queries is {queries}")
                 print(f"mengyao_debug gold_docs is {gold_docs}")
-                queries, overall_retrieval_result = self.retrieve(queries=queries, gold_docs=gold_docs)
-                """
-                mengyao_debug queries are 
-                
-                [QuerySolution(question="What is George Rankin's occupation?", 
-                docs=['George Rankin is a politician.', 
-                'Thomas Marwick is a politician.', 
-                'Oliver Badman is a politician.', 
-                "Erik Hort's is a football playerLebron is a basketball player",
-                 "Erik Hort's is a football player",
-                  "Erik Hort's birthplace is Montebello.", 
-                  'Montebello is a part of Rockland County.', 'Marina is bom in Minsk.',
-                   'The prince used the lost glass slipper to search the kingdom.', 
-                   'Cinderella attended the royal ball.', 
-                   'When the slipper fit perfectly, Cinderella was reunited with the prince.'], 
-                   doc_scores=array([5.49541397e-02, 1.86953305e-02, 1.62742763e-02, 3.89548275e-03,
-                   3.55822712e-03, 2.35467701e-03, 1.83932354e-03, 1.83828781e-03,
-       1.82085458e-03, 6.55748926e-04, 1.76145178e-05])
-       
-                overall_retrieval_result is 
-                {'Recall@1': 0.6111, 'Recall@2': 0.7222, 'Recall@5': 1.0, 
-                'Recall@10': 1.0, 'Recall@20': 1.0, 'Recall@30': 1.0, 
-                'Recall@50': 1.0, 'Recall@100': 1.0, 'Recall@150': 1.0, 
-                'Recall@200': 1.0}
-       
-                """
+                (queries, overall_retrieval_result,
+                 dpr_overall_retrieval_result, dpr_plus_overall_retrieval_result, example_retrieval_results,
+                 dpr_example_retrieval_results, dpr_plus_example_retrieval_results) = self.retrieve(queries=queries,
+                                                                                                    gold_docs=gold_docs,
+                                                                                                    all_gold_chunk_ids=all_gold_chunk_ids,
+                                                                                                    gold_chunk_id=gold_chunk_id)
+
                 # print(f"mengyao_debug queries are {queries} overall_retrieval_result is {overall_retrieval_result}")
             else:
-                queries = self.retrieve(queries=queries)
+                queries = self.retrieve(queries=queries, gold_chunk_id=gold_chunk_id,
+                                        all_gold_chunk_ids=all_gold_chunk_ids)
 
         # Performing QA
-        queries_solutions, all_response_message, all_metadata = self.qa(queries)
+        """
+        询问大模型
+        """
+        # queries_solutions, all_response_message, all_metadata = self.qa(queries)
+
+        ##todo mengyao_debug we dont have to really do the QA in here
+        queries_solutions, all_response_message, all_metadata = "", "", ""
+
         print(f"queries_solutions is {queries_solutions}")
         print(f"all_response_message is {all_response_message}")
         print(f"all_metadata is {all_metadata}")
@@ -910,9 +1023,14 @@ class HippoRAG:
                 if gold_docs is not None:
                     q.gold_docs = gold_docs[idx]
 
-            return queries_solutions, all_response_message, all_metadata, overall_retrieval_result, overall_qa_results
+            return (queries_solutions, all_response_message, all_metadata,
+                    overall_retrieval_result, dpr_overall_retrieval_result, dpr_plus_overall_retrieval_result,
+                    overall_qa_results,
+                    example_retrieval_results, dpr_example_retrieval_results, dpr_plus_example_retrieval_results)
         else:
-            return queries_solutions, all_response_message, all_metadata
+            return (queries_solutions, all_response_message, all_metadata,
+                    overall_retrieval_result, dpr_overall_retrieval_result, dpr_plus_overall_retrieval_result,
+                    example_retrieval_results, dpr_example_retrieval_results, dpr_plus_example_retrieval_results)
 
     def retrieve_dpr(self,
                      queries: List[str],
@@ -986,9 +1104,10 @@ class HippoRAG:
             return retrieval_results
 
     def rag_qa_dpr(self,
-               queries: List[str|QuerySolution],
-               gold_docs: List[List[str]] = None,
-               gold_answers: List[List[str]] = None) -> Tuple[List[QuerySolution], List[str], List[Dict]] | Tuple[List[QuerySolution], List[str], List[Dict], Dict, Dict]:
+                   queries: List[str | QuerySolution],
+                   gold_docs: List[List[str]] = None,
+                   gold_answers: List[List[str]] = None) -> Tuple[List[QuerySolution], List[str], List[Dict]] | Tuple[
+        List[QuerySolution], List[str], List[Dict], Dict, Dict]:
         """
         Performs retrieval-augmented generation enhanced QA using a standard DPR framework.
 
@@ -1074,7 +1193,7 @@ class HippoRAG:
                 - A list of raw response messages from the language model.
                 - A list of metadata dictionaries associated with the results.
         """
-        #Running inference for QA
+        # Running inference for QA
         all_qa_messages = []
 
         for query_solution in tqdm(queries, desc="Collecting QA prompts"):
@@ -1103,7 +1222,7 @@ class HippoRAG:
         all_response_message, all_metadata, all_cache_hit = zip(*all_qa_results)
         all_response_message, all_metadata = list(all_response_message), list(all_metadata)
 
-        #Process responses and extract predicted answers.
+        # Process responses and extract predicted answers.
         queries_solutions = []
         for query_solution_idx, query_solution in tqdm(enumerate(queries), desc="Extraction Answers from LLM Response"):
             response_content = all_response_message[query_solution_idx]
@@ -1145,9 +1264,9 @@ class HippoRAG:
 
         logger.info(f"Adding OpenIE triples to graph.")
 
-        print(f"mengyao_debug chunk_triples is {chunk_triples}")
+        # print(f"mengyao_debug chunk_triples is {chunk_triples}")
         for chunk_key, triples in tqdm(zip(chunk_ids, chunk_triples)):
-            print(f"mengyao_debug chunk_key is {chunk_key} triples is {triples}")
+            # print(f"mengyao_debug chunk_key is {chunk_key} triples is {triples}")
             entities_in_chunk = set()
 
             if chunk_key not in current_graph_nodes:
@@ -1189,8 +1308,8 @@ class HippoRAG:
 
                 for node in entities_in_chunk:
                     ## entities -> chunks
-                    self.ent_node_to_chunk_ids[node] = self.ent_node_to_chunk_ids.get(node, set()).union(set([chunk_key]))
-
+                    self.ent_node_to_chunk_ids[node] = self.ent_node_to_chunk_ids.get(node, set()).union(
+                        set([chunk_key]))
 
     def add_passage_edges(self, chunk_ids: List[str], chunk_triple_entities: List[List[str]]):
         """
@@ -1215,8 +1334,8 @@ class HippoRAG:
                 The number of new passage nodes added to the graph.
         """
 
-        print(f"mengyao_debug graph Vertex sequence is {self.graph.vs}")
-        print(f"mengyao_debug graph Edge sequence is {self.graph.es}")
+        # print(f"mengyao_debug graph Vertex sequence is {self.graph.vs}")
+        # print(f"mengyao_debug graph Edge sequence is {self.graph.es}")
         if "name" in self.graph.vs.attribute_names():
             current_graph_nodes = set(self.graph.vs["name"])
         else:
@@ -1233,15 +1352,14 @@ class HippoRAG:
         'chunk-435eaa3536ea075eb9b3cee5c14a4840', 'chunk-d6df73e3b8e71d69e39075792fb855cf', 
         'chunk-05ebe6854219bf0492e050c241805da4', 'entity-4382e967a6b504ff11a3f78bd80a8a6d'}
         """
-        print(f"mengyao_debug current_graph_nodes are {current_graph_nodes}")
+        # print(f"mengyao_debug current_graph_nodes are {current_graph_nodes}")
 
         for idx, chunk_key in tqdm(enumerate(chunk_ids)):
-            print(f"mengyao_debug appending idx {idx}, chunk key {chunk_key}")
+            # print(f"mengyao_debug appending idx {idx}, chunk key {chunk_key}")
 
             if chunk_key not in current_graph_nodes:
                 for chunk_ent in chunk_triple_entities[idx]:
                     node_key = compute_mdhash_id(chunk_ent, prefix="entity-")
-
 
                     self.node_to_node_stats[(chunk_key, node_key)] = {
                         "weight": 1,
@@ -1299,10 +1417,8 @@ class HippoRAG:
         'entity-5c2c2a6c9bed1b1e962c6800b4edfb11']
         
         """
-        print(f"mengyao_debug entity_id_to_row is {self.entity_id_to_row}\n"
-              f"entity_node_keys is {entity_node_keys}")
-
-
+        # print(f"mengyao_debug entity_id_to_row is {self.entity_id_to_row}\n"
+        #       f"entity_node_keys is {entity_node_keys}")
 
         entity_embs = self.entity_embedding_store.get_embeddings(entity_node_keys)
 
@@ -1314,7 +1430,6 @@ class HippoRAG:
                                                     k=self.global_config.synonymy_edge_topk,
                                                     query_batch_size=self.global_config.synonymy_edge_query_batch_size,
                                                     key_batch_size=self.global_config.synonymy_edge_key_batch_size)
-
 
         # print(f"mengyao_debug query_node_key2knn_node_keys is {query_node_key2knn_node_keys}")
         num_synonym_triple = 0
@@ -1338,7 +1453,7 @@ class HippoRAG:
                         break
 
                     nn_phrase = self.entity_id_to_row[nn]["content"]
-                    print(f"mengyao_debug nn_phrase is {nn_phrase}")
+                    # print(f"mengyao_debug nn_phrase is {nn_phrase}")
 
                     if nn != node_key and nn_phrase != '':
                         sim_edge = (node_key, nn)
@@ -1355,7 +1470,7 @@ class HippoRAG:
                         num_nns += 1
 
             synonym_candidates.append((node_key, synonyms))
-            print(f"mengyao_debug synonym_candidates are {synonym_candidates}")
+            # print(f"mengyao_debug synonym_candidates are {len(synonym_candidates)}")
 
     def load_existing_openie(self, chunk_keys: List[str]) -> Tuple[List[dict], Set[str]]:
         """
@@ -1382,7 +1497,7 @@ class HippoRAG:
             openie_results = json.load(open(self.openie_results_path))
             all_openie_info = openie_results.get('docs', [])
 
-            #Standardizing indices for OpenIE Files.
+            # Standardizing indices for OpenIE Files.
 
             renamed_openie_info = []
             for openie_info in all_openie_info:
@@ -1436,13 +1551,13 @@ class HippoRAG:
             passage = row['content']
             try:
                 chunk_openie_info = {'idx': chunk_key, 'passage': passage,
-                                 'extracted_entities': ner_results_dict[chunk_key].unique_entities,
-                                 'extracted_triples': triple_results_dict[chunk_key].triples}
+                                     'extracted_entities': ner_results_dict[chunk_key].unique_entities,
+                                     'extracted_triples': triple_results_dict[chunk_key].triples}
             except Exception as e:
                 logger.error(f"Error processing chunk {chunk_key}: {e}")
                 chunk_openie_info = {'idx': chunk_key, 'passage': passage,
-                                 'extracted_entities': [],
-                                 'extracted_triples': []}
+                                     'extracted_entities': [],
+                                     'extracted_triples': []}
             all_openie_info.append(chunk_openie_info)
 
         return all_openie_info
@@ -1471,13 +1586,13 @@ class HippoRAG:
             else:
                 avg_ent_chars = 0
                 avg_ent_words = 0
-                
+
             openie_dict = {
                 'docs': all_openie_info,
                 'avg_ent_chars': avg_ent_chars,
                 'avg_ent_words': avg_ent_words
             }
-            
+
             with open(self.openie_results_path, 'w') as f:
                 json.dump(openie_dict, f)
             logger.info(f"OpenIE results saved to {self.openie_results_path}")
@@ -1509,9 +1624,9 @@ class HippoRAG:
 
         entity_to_row = self.entity_embedding_store.get_all_id_to_rows()
         passage_to_row = self.chunk_embedding_store.get_all_id_to_rows()
-
-        print(f"mengyao_debug entity_to_row is {entity_to_row}\n"
-              f"passage_to_row is {passage_to_row}")
+        #
+        # print(f"mengyao_debug entity_to_row is {entity_to_row}\n"
+        #       f"passage_to_row is {passage_to_row}")
         node_to_rows = entity_to_row
         node_to_rows.update(passage_to_row)
 
@@ -1524,7 +1639,7 @@ class HippoRAG:
                         new_nodes[k] = []
                     new_nodes[k].append(v)
 
-        print(f"mengyao_debug new_nodes are {new_nodes}")
+        # print(f"mengyao_debug new_nodes are {new_nodes}")
         if len(new_nodes) > 0:
             self.graph.add_vertices(n=len(next(iter(new_nodes.values()))), attributes=new_nodes)
 
@@ -1539,7 +1654,7 @@ class HippoRAG:
         edge_source_node_keys = []
         edge_target_node_keys = []
         edge_metadata = []
-        print(f"mengyao_debug self.node_to_node_stats is {self.node_to_node_stats}")
+        # print(f"mengyao_debug self.node_to_node_stats is {self.node_to_node_stats}")
         for edge, attributes in self.node_to_node_stats.items():
             if edge[0] == edge[1]:
                 continue
@@ -1557,10 +1672,10 @@ class HippoRAG:
             "chunks": [],
         }
         current_node_ids = set(self.graph.vs["name"])
-        print(f"mengyao_debug current_node_ids is {current_node_ids}")
-        print(f"mengyao_debug edge_source_node_keys is {edge_source_node_keys}")
-        print(f"mengyao_debug edge_target_node_keys is {edge_target_node_keys}")
-        print(f"mengyao_debug edge_metadata is {edge_metadata}")
+        # print(f"mengyao_debug current_node_ids is {current_node_ids}")
+        # print(f"mengyao_debug edge_source_node_keys is {edge_source_node_keys}")
+        # print(f"mengyao_debug edge_target_node_keys is {edge_target_node_keys}")
+        # print(f"mengyao_debug edge_metadata is {edge_metadata}")
         for source_node_id, target_node_id, edge_d in zip(edge_source_node_keys, edge_target_node_keys, edge_metadata):
             if source_node_id in current_node_ids and target_node_id in current_node_ids:
                 valid_edges.append((source_node_id, target_node_id))
@@ -1573,13 +1688,13 @@ class HippoRAG:
             else:
                 logger.warning(f"Edge {source_node_id} -> {target_node_id} is not valid.")
 
-        print(f"mengyao_debug valid_edges are {valid_edges}")
-        print(f"mengyao_debug valid_attributes are {valid_attributes}")
+        # print(f"mengyao_debug valid_edges are {valid_edges}")
+        # print(f"mengyao_debug valid_attributes are {valid_attributes}")
         res = self.graph.add_edges(
             valid_edges,
             attributes=valid_attributes
         )
-        print(f"mengyao_debug add graph edges res is {res}")
+        # print(f"mengyao_debug add graph edges res is {res}")
 
     def save_igraph(self):
         logger.info(
@@ -1655,14 +1770,14 @@ class HippoRAG:
         logger.info("Loading keys.")
         self.query_to_embedding: Dict = {'triple': {}, 'passage': {}}
 
-        self.entity_node_keys: List = list(self.entity_embedding_store.get_all_ids()) # a list of phrase node keys
-        self.passage_node_keys: List = list(self.chunk_embedding_store.get_all_ids()) # a list of passage node keys
+        self.entity_node_keys: List = list(self.entity_embedding_store.get_all_ids())  # a list of phrase node keys
+        self.passage_node_keys: List = list(self.chunk_embedding_store.get_all_ids())  # a list of passage node keys
         self.fact_node_keys: List = list(self.fact_embedding_store.get_all_ids())
 
         # Check if the graph has the expected number of nodes
         expected_node_count = len(self.entity_node_keys) + len(self.passage_node_keys)
         actual_node_count = self.graph.vcount()
-        
+
         if expected_node_count != actual_node_count:
             logger.warning(f"Graph node count mismatch: expected {expected_node_count}, got {actual_node_count}")
             # If the graph is empty but we have nodes, we need to add them
@@ -1673,24 +1788,30 @@ class HippoRAG:
 
         # Create mapping from node name to vertex index
         try:
-            igraph_name_to_idx = {node["name"]: idx for idx, node in enumerate(self.graph.vs)} # from node key to the index in the backbone graph
+            igraph_name_to_idx = {node["name"]: idx for idx, node in
+                                  enumerate(self.graph.vs)}  # from node key to the index in the backbone graph
             self.node_name_to_vertex_idx = igraph_name_to_idx
-            
+
             # Check if all entity and passage nodes are in the graph
-            missing_entity_nodes = [node_key for node_key in self.entity_node_keys if node_key not in igraph_name_to_idx]
-            missing_passage_nodes = [node_key for node_key in self.passage_node_keys if node_key not in igraph_name_to_idx]
-            
+            missing_entity_nodes = [node_key for node_key in self.entity_node_keys if
+                                    node_key not in igraph_name_to_idx]
+            missing_passage_nodes = [node_key for node_key in self.passage_node_keys if
+                                     node_key not in igraph_name_to_idx]
+
             if missing_entity_nodes or missing_passage_nodes:
-                logger.warning(f"Missing nodes in graph: {len(missing_entity_nodes)} entity nodes, {len(missing_passage_nodes)} passage nodes")
+                logger.warning(
+                    f"Missing nodes in graph: {len(missing_entity_nodes)} entity nodes, {len(missing_passage_nodes)} passage nodes")
                 # If nodes are missing, rebuild the graph
                 self.add_new_nodes()
                 self.save_igraph()
                 # Update the mapping
                 igraph_name_to_idx = {node["name"]: idx for idx, node in enumerate(self.graph.vs)}
                 self.node_name_to_vertex_idx = igraph_name_to_idx
-            
-            self.entity_node_idxs = [igraph_name_to_idx[node_key] for node_key in self.entity_node_keys] # a list of backbone graph node index
-            self.passage_node_idxs = [igraph_name_to_idx[node_key] for node_key in self.passage_node_keys] # a list of backbone passage node index
+
+            self.entity_node_idxs = [igraph_name_to_idx[node_key] for node_key in
+                                     self.entity_node_keys]  # a list of backbone graph node index
+            self.passage_node_idxs = [igraph_name_to_idx[node_key] for node_key in
+                                      self.passage_node_keys]  # a list of backbone passage node index
         except Exception as e:
             logger.error(f"Error creating node index mapping: {str(e)}")
             # Initialize with empty lists if mapping fails
@@ -1701,7 +1822,6 @@ class HippoRAG:
         logger.info("Loading embeddings.")
         self.entity_embeddings = np.array(self.entity_embedding_store.get_embeddings(self.entity_node_keys))
         self.passage_embeddings = np.array(self.chunk_embedding_store.get_embeddings(self.passage_node_keys))
-
 
         # print(f"mengyao_debug fact_node_keys is {self.fact_node_keys}")
         self.fact_embeddings = np.array(self.fact_embedding_store.get_embeddings(self.fact_node_keys))
@@ -1715,15 +1835,18 @@ class HippoRAG:
             for triple in triples:
                 if len(triple) == 3:
                     proc_triple = tuple(text_processing(list(triple)))
-                    self.proc_triples_to_docs[str(proc_triple)] = self.proc_triples_to_docs.get(str(proc_triple), set()).union(set([doc['idx']]))
+                    self.proc_triples_to_docs[str(proc_triple)] = self.proc_triples_to_docs.get(str(proc_triple),
+                                                                                                set()).union(
+                        set([doc['idx']]))
 
         if self.ent_node_to_chunk_ids is None:
             ner_results_dict, triple_results_dict = reformat_openie_results(all_openie_info)
 
             # Check if the lengths match
             if not (len(self.passage_node_keys) == len(ner_results_dict) == len(triple_results_dict)):
-                logger.warning(f"Length mismatch: passage_node_keys={len(self.passage_node_keys)}, ner_results_dict={len(ner_results_dict)}, triple_results_dict={len(triple_results_dict)}")
-                
+                logger.warning(
+                    f"Length mismatch: passage_node_keys={len(self.passage_node_keys)}, ner_results_dict={len(ner_results_dict)}, triple_results_dict={len(triple_results_dict)}")
+
                 # If there are missing keys, create empty entries for them
                 for chunk_id in self.passage_node_keys:
                     if chunk_id not in ner_results_dict:
@@ -1742,7 +1865,8 @@ class HippoRAG:
                         )
 
             # prepare data_store
-            chunk_triples = [[text_processing(t) for t in triple_results_dict[chunk_id].triples] for chunk_id in self.passage_node_keys]
+            chunk_triples = [[text_processing(t) for t in triple_results_dict[chunk_id].triples] for chunk_id in
+                             self.passage_node_keys]
 
             self.node_to_node_stats = {}
             self.ent_node_to_chunk_ids = {}
@@ -1762,7 +1886,7 @@ class HippoRAG:
         """
 
         all_query_strings = []
-        print(f"mengyao_debug self.query_to_embedding is {self.query_to_embedding}")
+        # print(f"mengyao_debug self.query_to_embedding is {self.query_to_embedding}")
         for query in queries:
             if isinstance(query, QuerySolution) and (
                     query.question not in self.query_to_embedding['triple'] or query.question not in
@@ -1771,25 +1895,27 @@ class HippoRAG:
             elif query not in self.query_to_embedding['triple'] or query not in self.query_to_embedding['passage']:
                 all_query_strings.append(query)
 
-        print(f"mengyao_debug all_query_strings are {all_query_strings}")
+        # print(f"mengyao_debug all_query_strings are {all_query_strings}")
 
         if len(all_query_strings) > 0:
             # get all query embeddings
             logger.info(f"Encoding {len(all_query_strings)} queries for query_to_fact.")
             query_embeddings_for_triple = self.embedding_model.batch_encode(all_query_strings,
-                                                                            instruction=get_query_instruction('query_to_fact'),
+                                                                            instruction=get_query_instruction(
+                                                                                'query_to_fact'),
                                                                             norm=True)
 
-            print(f"mengyao_debug query_embeddings_for_triple are {query_embeddings_for_triple}")
+            # print(f"mengyao_debug query_embeddings_for_triple are {query_embeddings_for_triple}")
             for query, embedding in zip(all_query_strings, query_embeddings_for_triple):
                 self.query_to_embedding['triple'][query] = embedding
 
             logger.info(f"Encoding {len(all_query_strings)} queries for query_to_passage.")
             query_embeddings_for_passage = self.embedding_model.batch_encode(all_query_strings,
-                                                                             instruction=get_query_instruction('query_to_passage'),
+                                                                             instruction=get_query_instruction(
+                                                                                 'query_to_passage'),
                                                                              norm=True)
 
-            print(f"mengyao_debug query_embeddings_for_passage are {query_embeddings_for_passage}")
+            # print(f"mengyao_debug query_embeddings_for_passage are {query_embeddings_for_passage}")
             for query, embedding in zip(all_query_strings, query_embeddings_for_passage):
                 self.query_to_embedding['passage'][query] = embedding
 
@@ -1824,9 +1950,9 @@ class HippoRAG:
             logger.warning("No facts available for scoring. Returning empty array.")
             return np.array([])
 
-        print(f"mengyao_debug self.fact_embeddings is {self.fact_embeddings}")
+        # print(f"mengyao_debug self.fact_embeddings is {self.fact_embeddings}")
         try:
-            query_fact_scores = np.dot(self.fact_embeddings, query_embedding.T) # shape: (#facts, )
+            query_fact_scores = np.dot(self.fact_embeddings, query_embedding.T)  # shape: (#facts, )
             query_fact_scores = np.squeeze(query_fact_scores) if query_fact_scores.ndim == 2 else query_fact_scores
             query_fact_scores = min_max_normalize(query_fact_scores)
             return query_fact_scores
@@ -1865,12 +1991,13 @@ class HippoRAG:
                                                                 norm=True)
         query_doc_scores = np.dot(self.passage_embeddings, query_embedding.T)
         query_doc_scores = np.squeeze(query_doc_scores) if query_doc_scores.ndim == 2 else query_doc_scores
+        # print(f"mengyao_debug query_doc_scores is {query_doc_scores}")
         query_doc_scores = min_max_normalize(query_doc_scores)
+        # print(f"mengyao_debug min_max_normalize query_doc_scores is {query_doc_scores}")
 
         sorted_doc_ids = np.argsort(query_doc_scores)[::-1]
         sorted_doc_scores = query_doc_scores[sorted_doc_ids.tolist()]
         return sorted_doc_ids, sorted_doc_scores
-
 
     def get_top_k_weights(self,
                           link_top_k: int,
@@ -1908,6 +2035,8 @@ class HippoRAG:
                 if phrase_id is not None:
                     all_phrase_weights[phrase_id] = 0.0
 
+        # print(f"mengyao_debug len all_phrase_weights is {np.count_nonzero(all_phrase_weights)}, "
+        #       f"len linking_score_map is  {len(linking_score_map.keys())}")
         assert np.count_nonzero(all_phrase_weights) == len(linking_score_map.keys())
         return all_phrase_weights, linking_score_map
 
@@ -1916,7 +2045,9 @@ class HippoRAG:
                                         query_fact_scores: np.ndarray,
                                         top_k_facts: List[Tuple],
                                         top_k_fact_indices: List[str],
-                                        passage_node_weight: float = 0.05) -> Tuple[np.ndarray, np.ndarray]:
+                                        passage_node_weight: float = 0.05,
+                                        all_gold_docs: List[str] = None) -> Tuple[
+        np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
         Computes document scores based on fact-based similarity and relevance using personalized
         PageRank (PPR) and dense retrieval models. This function combines the signal from the relevant
@@ -1941,34 +2072,43 @@ class HippoRAG:
                 - The second array consists of the PPR scores associated with the sorted document IDs.
         """
 
-        #Assigning phrase weights based on selected facts from previous steps.
+        # Assigning phrase weights based on selected facts from previous steps.
         linking_score_map = {}  # from phrase to the average scores of the facts that contain the phrase
         phrase_scores = {}  # store all fact scores for each phrase regardless of whether they exist in the knowledge graph or not
         phrase_weights = np.zeros(len(self.graph.vs['name']))
         passage_weights = np.zeros(len(self.graph.vs['name']))
         number_of_occurs = np.zeros(len(self.graph.vs['name']))
 
+        dpr_node_keys = []
+        dpr_node_scores = []
+        ppr_node_keys = []
+        ppr_node_scores = []
+
         phrases_and_ids = set()
 
-        print(f"mengyao_debug query_fact_scores is {query_fact_scores}")
-        print(f"mengyao_debug top_k_fact_indices is {top_k_fact_indices}")
-        print(f"mengyao_debug phrase_weights length is {len(phrase_weights)}")
+        # print(f"mengyao_debug query_fact_scores is {query_fact_scores}")
+        # print(f"mengyao_debug top_k_fact_indices is {top_k_fact_indices}")
+        # print(f"mengyao_debug phrase_weights length is {len(phrase_weights)}")
 
-
+        print(f"mengyao_debug gold_docs is {all_gold_docs}")
 
         for rank, f in enumerate(top_k_facts):
             """
             主谓宾
             """
-            subject_phrase = f[0].lower()
-            predicate_phrase = f[1].lower()
-            object_phrase = f[2].lower()
+            # subject_phrase = f[0].lower()
+            # predicate_phrase = f[1].lower()
+            # object_phrase = f[2].lower()
+
+            ##todo@mengyao 这里不知道为什么改成了小写导致有问题
+            subject_phrase = f[0]
+            predicate_phrase = f[1]
+            object_phrase = f[2]
             """
             score是通过 fact 和 query算出来的；
             """
             fact_score = query_fact_scores[
                 top_k_fact_indices[rank]] if query_fact_scores.ndim > 0 else query_fact_scores
-
 
             for phrase in [subject_phrase, object_phrase]:
                 phrase_key = compute_mdhash_id(
@@ -1977,9 +2117,9 @@ class HippoRAG:
                 )
                 phrase_id = self.node_name_to_vertex_idx.get(phrase_key, None)
 
-                print(f"mengyao_debug phrase is {phrase}")
-                print(f"mengyao_debug phrase_key is {phrase_key}")
-                print(f"mengyao_debug phrase_id is {phrase_id}")
+                # print(f"mengyao_debug phrase is {phrase}")
+                # print(f"mengyao_debug phrase_key is {phrase_key}")
+                # print(f"mengyao_debug phrase_id is {phrase_id}")
 
                 if phrase_id is not None:
                     weighted_fact_score = fact_score
@@ -1989,19 +2129,17 @@ class HippoRAG:
                         如果一个phrase指向多篇文章，那这个entity对应的weighted_fact_score 权重要下降；
                         """
                         weighted_fact_score /= len(self.ent_node_to_chunk_ids[phrase_key])
-                        print(f"mengyao_debug {phrase} weighted_fact_score "
-                              f"scale by {len(self.ent_node_to_chunk_ids[phrase_key])} "
-                              f"weighted_fact_score is {weighted_fact_score}")
-
+                        # print(f"mengyao_debug {phrase} weighted_fact_score "
+                        #       f"scale by {len(self.ent_node_to_chunk_ids[phrase_key])} "
+                        #       f"weighted_fact_score is {weighted_fact_score}")
 
                     phrase_weights[phrase_id] += weighted_fact_score
                     number_of_occurs[phrase_id] += 1
 
                 phrases_and_ids.add((phrase, phrase_id))
 
-        print(f"mengyao_debug phrases_and_ids are {phrases_and_ids}， "
-              f"phrase_weights is {phrase_weights}, number_of_occurs is {number_of_occurs}")
-
+        # print(f"mengyao_debug phrases_and_ids are {phrases_and_ids}， "
+        #       f"phrase_weights is {phrase_weights}, number_of_occurs is {number_of_occurs}")
 
         ##todo 这里好像有问题 稍微改一下
         number_of_occurs[number_of_occurs == 0] = 1
@@ -2020,6 +2158,20 @@ class HippoRAG:
 
         print(f"mengyao_debug phrase_scores is {phrase_scores}")
 
+        def compare_lists_basic(list1, list2):
+            """
+            基础版本：比较两个列表每个位置的差异
+            """
+            if len(list1) != len(list2):
+                print(f"警告：列表长度不同！list1有{len(list1)}个元素，list2有{len(list2)}个元素")
+                return
+
+            differences = []
+            for i in range(len(list1)):
+                if list1[i] != list2[i]:
+                    differences.append((i, list1[i], list2[i]))
+
+            return differences
 
         """
         筛选高分
@@ -2027,65 +2179,118 @@ class HippoRAG:
         if link_top_k:
             print(f"mengyao_debug using link_top_k, phrase_weights is {phrase_weights}")
             phrase_weights, linking_score_map = self.get_top_k_weights(link_top_k,
-                                                                           phrase_weights,
-                                                                           linking_score_map)  # at this stage, the length of linking_scope_map is determined by link_top_k
+                                                                       phrase_weights,
+                                                                       linking_score_map)  # at this stage, the length of linking_scope_map is determined by link_top_k
         print(f"mengyao_debug linking_score_map are {linking_score_map}")
 
-        #Get passage scores according to chosen dense retrieval model
+        # Get passage scores according to chosen dense retrieval model
         """
         文章和问题之间的相关性；
         """
         dpr_sorted_doc_ids, dpr_sorted_doc_scores = self.dense_passage_retrieval(query)
+        all_facts_paragraph = " ".join([" ".join(fact) for fact in top_k_facts])
+        query_with_fact = f"{all_facts_paragraph} {query}"
+        print(f"query_with_fact is {query_with_fact}")
+        dpr_plus_sorted_doc_ids, dpr_plus_sorted_doc_scores = self.dense_passage_retrieval(query_with_fact)
         normalized_dpr_sorted_scores = min_max_normalize(dpr_sorted_doc_scores)
-        print(f"mengyao_debug dpr_sorted_doc_ids are {dpr_sorted_doc_ids}")
-        print(f"mengyao_debug dpr_sorted_doc_scores are {dpr_sorted_doc_scores}")
-        print(f"mengyao_debug normalized_dpr_sorted_scores are {normalized_dpr_sorted_scores}")
-
+        # print(f"mengyao_debug dpr_sorted_doc_ids are {dpr_sorted_doc_ids}")
+        # print(f"mengyao_debug dpr_sorted_doc_scores are {dpr_sorted_doc_scores}")
+        # print(f"mengyao_debug normalized_dpr_sorted_scores are {normalized_dpr_sorted_scores}")
 
         for i, dpr_sorted_doc_id in enumerate(dpr_sorted_doc_ids.tolist()):
             passage_node_key = self.passage_node_keys[dpr_sorted_doc_id]
             passage_dpr_score = normalized_dpr_sorted_scores[i]
+            dpr_node_keys.append(passage_node_key)
+            dpr_node_scores.append(passage_dpr_score)
             passage_node_id = self.node_name_to_vertex_idx[passage_node_key]
             passage_weights[passage_node_id] = passage_dpr_score * passage_node_weight
             passage_node_text = self.chunk_embedding_store.get_row(passage_node_key)["content"]
             linking_score_map[passage_node_text] = passage_dpr_score * passage_node_weight
-            print(f"passage_node_key is {passage_node_key}\n"
-                  f"passage_dpr_score is {passage_dpr_score}\n"
-                  f"passage_node_id is {passage_node_id}\n"
-                  f"passage_node_text is {passage_node_text}\n"
-                  f"passage_dpr_score is {passage_dpr_score}\n")
+            if i < 10:
+                print(
+                    f"【top5】【第1步匹配】排名第{i} passage_node_key is {passage_node_key}，passage_dpr_score is {passage_dpr_score}, content is {passage_node_text}\n")
+            if passage_node_text in all_gold_docs:
+                print(
+                    f"【第1步匹配】排名第{i} passage_node_key is {passage_node_key}，passage_dpr_score is {passage_dpr_score}, content is {passage_node_text}\n")
 
-        #Combining phrase and passage scores into one array for PPR
+        for i, dpr_sorted_doc_id in enumerate(dpr_plus_sorted_doc_ids.tolist()):
+            passage_node_key = self.passage_node_keys[dpr_sorted_doc_id]
+            passage_dpr_score = normalized_dpr_sorted_scores[i]
+            dpr_node_keys.append(passage_node_key)
+            dpr_node_scores.append(passage_dpr_score)
+            passage_node_id = self.node_name_to_vertex_idx[passage_node_key]
+            passage_weights[passage_node_id] = passage_dpr_score * passage_node_weight
+            passage_node_text = self.chunk_embedding_store.get_row(passage_node_key)["content"]
+            linking_score_map[passage_node_text] = passage_dpr_score * passage_node_weight
+            if i < 10:
+                print(
+                    f"【top5】【第1.5步匹配】排名第{i} passage_node_key is {passage_node_key}，passage_dpr_score is {passage_dpr_score}, content is {passage_node_text}\n")
+            if passage_node_text in all_gold_docs:
+                print(
+                    f"【第1.5步匹配】排名第{i} passage_node_key is {passage_node_key}，passage_dpr_score is {passage_dpr_score}, content is {passage_node_text}\n")
+
+        # Combining phrase and passage scores into one array for PPR
         """
         把两个加起来了，但是是两个列表，每个点代表了一个vertex，他可以是phrase（主语宾语）也可以是chunk（文章）
         """
         node_weights = phrase_weights + passage_weights
-
         non_zero_indices = np.nonzero(node_weights)[0]
-        for idx in non_zero_indices:
+        non_zero_weights = node_weights[non_zero_indices]
+
+        top10_indices_in_nonzero = np.argsort(non_zero_weights)[-10:][::-1]
+        top10_indices_original = non_zero_indices[top10_indices_in_nonzero]
+        for idx in top10_indices_original:
             print(f"""mengyao_debug 索引 {idx}: 
             权重 = {node_weights[idx]:.6f}，
-            节点 {self.graph.vs[idx]["content"][:15]}""")
+            节点 {self.graph.vs[idx]["content"]}""")
 
-
-        #Recording top 30 facts in linking_score_map
+        # Recording top 30 facts in linking_score_map
         if len(linking_score_map) > 30:
             linking_score_map = dict(sorted(linking_score_map.items(), key=lambda x: x[1], reverse=True)[:30])
 
         assert sum(node_weights) > 0, f'No phrases found in the graph for the given facts: {top_k_facts}'
 
-        #Running PPR algorithm based on the passage and phrase weights previously assigned
+        # Running PPR algorithm based on the passage and phrase weights previously assigned
         ppr_start = time.time()
         ppr_sorted_doc_ids, ppr_sorted_doc_scores = self.run_ppr(node_weights, damping=self.global_config.damping)
         ppr_end = time.time()
+
+        print(f"ppr time is {ppr_end - ppr_start}")
+
+        # print(f"mengyao_debug ppr和dpr不同的位置有 {compare_lists_basic(dpr_sorted_doc_ids, ppr_sorted_doc_ids)}")
+
+        for i, ppr_sorted_doc_id in enumerate(ppr_sorted_doc_ids.tolist()):
+            passage_node_key = self.passage_node_keys[ppr_sorted_doc_id]
+            passage_ppr_score = ppr_sorted_doc_scores[i]
+            ppr_node_keys.append(passage_node_key)
+            ppr_node_scores.append(passage_ppr_score)
+            content = self.chunk_embedding_store.get_row(passage_node_key)["content"]
+            if i < 10:
+                print(
+                    f"【top5】【第2步匹配】排名第{i} passage_node_key is {passage_node_key}，passage_ppr_score is {passage_ppr_score}, content is {content}\n")
+            if content in all_gold_docs:
+                print(
+                    f"【第2步匹配】排名第{i} passage_node_key is {passage_node_key}，passage_ppr_score is {passage_ppr_score}, content is {content}\n")
+
+        final_sort_res = {
+            "query": query,
+            "dpr": {
+                "dpr_node_keys": dpr_node_keys,
+                "dpr_node_scores": dpr_node_keys
+            },
+            "ppr": {
+                "ppr_node_keys": ppr_node_keys,
+                "ppr_node_scores": ppr_node_scores
+            }
+        }
+        self.final_sort_results.append(final_sort_res)
 
         self.ppr_time += (ppr_end - ppr_start)
 
         assert len(ppr_sorted_doc_ids) == len(
             self.passage_node_idxs), f"Doc prob length {len(ppr_sorted_doc_ids)} != corpus length {len(self.passage_node_idxs)}"
 
-        return ppr_sorted_doc_ids, ppr_sorted_doc_scores
-
+        return dpr_sorted_doc_ids, dpr_sorted_doc_scores, dpr_plus_sorted_doc_ids, dpr_plus_sorted_doc_scores, ppr_sorted_doc_ids, ppr_sorted_doc_scores
 
     def rerank_facts(self, query: str, query_fact_scores: np.ndarray) -> Tuple[List[int], List[Tuple], dict]:
         """
@@ -2115,7 +2320,7 @@ class HippoRAG:
         if len(query_fact_scores) == 0 or len(self.fact_node_keys) == 0:
             logger.warning("No facts available for reranking. Returning empty lists.")
             return [], [], {'facts_before_rerank': [], 'facts_after_rerank': []}
-            
+
         try:
             # Get the top k facts by score
             if len(query_fact_scores) <= link_top_k:
@@ -2124,7 +2329,7 @@ class HippoRAG:
             else:
                 # Otherwise get the top k
                 candidate_fact_indices = np.argsort(query_fact_scores)[-link_top_k:][::-1].tolist()
-                
+
             # Get the actual fact IDs
             real_candidate_fact_ids = [self.fact_node_keys[idx] for idx in candidate_fact_indices]
             fact_row_dict = self.fact_embedding_store.get_rows(real_candidate_fact_ids)
@@ -2135,10 +2340,11 @@ class HippoRAG:
              fact_row_dict is {'fact-a798cac753d0f061a97a12678ae0175c': {'hash_id': 'fact-a798cac753d0f061a97a12678ae0175c', 'content': "('erik hort', 'birthplace', 'montebello')"}, 'fact-1341a29a71946ff5dfae70703714cab4': {'hash_id': 'fact-1341a29a71946ff5dfae70703714cab4', 'content': "('erik hort', 'is', 'football player')"}, 'fact-55ffb21c5c0d711781232e80fda1baea': {'hash_id': 'fact-55ffb21c5c0d711781232e80fda1baea', 'content': "('erik hort', 'is a', 'football player')"}, 'fact-2877d96752c9607ed3dae9a59dffc8d9': {'hash_id': 'fact-2877d96752c9607ed3dae9a59dffc8d9', 'content': "('marina', 'born in', 'minsk')"}, 'fact-4fd022a97d99c09abd4c9126a43319c2': {'hash_id': 'fact-4fd022a97d99c09abd4c9126a43319c2', 'content': "('montebello', 'located in', 'rockland county')"}}
              candidate_facts is [('erik hort', 'birthplace', 'montebello'), ('erik hort', 'is', 'football player'), ('erik hort', 'is a', 'football player'), ('marina', 'born in', 'minsk'), ('montebello', 'located in', 'rockland county')]
             """
-            print(f"mengyao_debug real_candidate_fact_ids is {real_candidate_fact_ids}\n "
+            print(f"mengyao_debug query is {query}"
+                  f"real_candidate_fact_ids is {real_candidate_fact_ids}\n "
                   f"fact_row_dict is {fact_row_dict}\n "
                   f"candidate_facts is {candidate_facts}")
-            
+
             # Rerank the facts
             """
             用大模型对facts进行排序；
@@ -2147,7 +2353,7 @@ class HippoRAG:
                                                                                 candidate_facts,
                                                                                 candidate_fact_indices,
                                                                                 len_after_rerank=link_top_k)
-            
+
             rerank_log = {'facts_before_rerank': candidate_facts, 'facts_after_rerank': top_k_facts}
 
             """
@@ -2158,16 +2364,16 @@ class HippoRAG:
             print(f"mengyao_debug top_k_fact_indices is {top_k_fact_indices}\n "
                   f"top_k_facts is {top_k_facts}\n "
                   f"reranker_dict is {reranker_dict}")
-            
+
             return top_k_fact_indices, top_k_facts, rerank_log
-            
+
         except Exception as e:
             logger.error(f"Error in rerank_facts: {str(e)}")
             return [], [], {'facts_before_rerank': [], 'facts_after_rerank': [], 'error': str(e)}
-    
+
     def run_ppr(self,
                 reset_prob: np.ndarray,
-                damping: float =0.5) -> Tuple[np.ndarray, np.ndarray]:
+                damping: float = 0.5) -> Tuple[np.ndarray, np.ndarray]:
         """
         Runs Personalized PageRank (PPR) on a graph and computes relevance scores for
         nodes corresponding to document passages. The method utilizes a damping
@@ -2190,7 +2396,7 @@ class HippoRAG:
                 in the same order.
         """
 
-        if damping is None: damping = 0.5 # for potential compatibility
+        if damping is None: damping = 0.5  # for potential compatibility
         reset_prob = np.where(np.isnan(reset_prob) | (reset_prob < 0), 0, reset_prob)
         pagerank_scores = self.graph.personalized_pagerank(
             vertices=range(len(self.node_name_to_vertex_idx)),
@@ -2206,3 +2412,7 @@ class HippoRAG:
         sorted_doc_scores = doc_scores[sorted_doc_ids.tolist()]
 
         return sorted_doc_ids, sorted_doc_scores
+
+    def dump_all_results_to_local(self, save_directory: str):
+        with open(f"{save_directory}/final_res.json", 'w', encoding='utf-8') as f:
+            json.dump(self.final_sort_results, f, ensure_ascii=False, indent=4)

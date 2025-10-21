@@ -75,7 +75,7 @@ class OpenAIEmbeddingModel(BaseEmbeddingModel):
     def encode(self, texts: List[str]):
         texts = [t.replace("\n", " ") for t in texts]
         texts = [t if t != '' else ' ' for t in texts]
-        print(f"mengyao_debug embedding_model_name is {self.embedding_model_name}, texts size is {len(texts)}")
+        # print(f"mengyao_debug embedding_model_name is {self.embedding_model_name}, texts size is {len(texts)}")
         response = self.client.embeddings.create(input=texts, model=self.embedding_model_name)
         results = np.array([v.embedding for v in response.data])
 
@@ -106,7 +106,8 @@ class OpenAIEmbeddingModel(BaseEmbeddingModel):
                 batch = texts[i:i + batch_size]
                 try:
                     results.append(self.encode(batch))
-                except:
+                except Exception as E:
+                    print(f"exception! {E}")
                     import ipdb; ipdb.set_trace()
                 pbar.update(batch_size)
             pbar.close()
