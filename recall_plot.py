@@ -1,16 +1,18 @@
 import json
 import matplotlib.pyplot as plt
 import numpy as np
+from typing import List, Dict, Any
+import os
 
 
-def read_json_file(file_path):
+def read_json_file(file_path: str) -> List[Dict[str, Any]]:
     """Read JSON file and return data"""
     with open(file_path, 'r', encoding='utf-8') as f:
         data = json.load(f)
     return data
 
 
-def extract_recall_values(data_list):
+def extract_recall_values(data_list: List[Dict[str, Any]]) -> Dict[int, float]:
     """Extract Recall@k values from data list"""
     recall_values = {}
 
@@ -30,23 +32,39 @@ def extract_recall_values(data_list):
     return recall_avg
 
 
-def plot_recall_comparison(recall_dict1, recall_dict2, label1="File 1", label2="File 2"):
-    """Plot Recall comparison between two files"""
+def plot_recall_comparison(recall_dicts: List[Dict[int, float]],
+                           labels: List[str],
+                           colors: List[str] = None):
+    """Plot Recall comparison between multiple files"""
+
+    if colors is None:
+        # Default color scheme
+        colors = ['blue', 'red', 'green', 'orange', 'purple', 'brown', 'pink', 'gray']
+
     plt.figure(figsize=(14, 8))
 
-    # Extract k values and corresponding averages
-    k_values = sorted(recall_dict1.keys())
-    avg_values1 = [recall_dict1[k] for k in k_values]
-    avg_values2 = [recall_dict2[k] for k in k_values]
-
-    # Create x positions with proper spacing
+    # Use the first file's k values as reference (assuming all have same k values)
+    k_values = sorted(recall_dicts[0].keys())
     x_positions = np.arange(len(k_values))
 
-    # Plot line chart
-    plt.plot(x_positions, avg_values1, 'o-', linewidth=2.5, markersize=8,
-             label=label1, color='blue', alpha=0.8)
-    plt.plot(x_positions, avg_values2, 's-', linewidth=2.5, markersize=8,
-             label=label2, color='red', alpha=0.8)
+    # Plot line chart for each file
+    markers = ['o', 's', '^', 'D', 'v', '<', '>', 'p']  # Different markers for each line
+
+    for i, (recall_dict, label) in enumerate(zip(recall_dicts, labels)):
+        if i >= len(colors):
+            color = colors[i % len(colors)]
+        else:
+            color = colors[i]
+
+        if i >= len(markers):
+            marker = markers[i % len(markers)]
+        else:
+            marker = markers[i]
+
+        avg_values = [recall_dict[k] for k in k_values]
+
+        plt.plot(x_positions, avg_values, f'{marker}-', linewidth=2.5, markersize=8,
+                 label=label, color=color, alpha=0.8)
 
     # Set chart properties
     plt.xlabel('k value (Recall@k)', fontsize=12)
@@ -58,49 +76,93 @@ def plot_recall_comparison(recall_dict1, recall_dict2, label1="File 1", label2="
     # Set x-axis ticks with proper spacing
     plt.xticks(x_positions, [f'@{k}' for k in k_values], rotation=45)
 
-    # Add value annotations with offset to avoid overlap
-    for i, (k, v1, v2) in enumerate(zip(k_values, avg_values1, avg_values2)):
-        plt.annotate(f'{v1:.3f}', (x_positions[i], v1), textcoords="offset points",
-                     xytext=(0, 10), ha='center', fontsize=9, color='blue', fontweight='bold')
-        plt.annotate(f'{v2:.3f}', (x_positions[i], v2), textcoords="offset points",
-                     xytext=(0, -15), ha='center', fontsize=9, color='red', fontweight='bold')
+    # Add value annotations (optional - can be commented out if too crowded)
+    for i, k in enumerate(k_values):
+        for j, recall_dict in enumerate(recall_dicts):
+            value = recall_dict[k]
+            vertical_offset = 10 + (j * 25)  # Stagger annotations to avoid overlap
+            color = colors[j % len(colors)]
+            plt.annotate(f'{value:.3f}', (x_positions[i], value),
+                         textcoords="offset points", xytext=(0, vertical_offset),
+                         ha='center', fontsize=8, color=color, fontweight='bold')
 
     # Adjust layout
     plt.tight_layout()
     plt.show()
 
 
-def print_statistics(recall_dict, label):
-    """Print statistics"""
-    print(f"\n{label} Recall Statistics:")
-    print("-" * 35)
-    for k, avg in sorted(recall_dict.items()):
-        print(f"Recall@{k}: {avg:.4f}")
+def print_statistics(recall_dicts: List[Dict[int, float]], labels: List[str]):
+    """Print statistics for multiple files"""
+    print("\n" + "=" * 50)
+    print("Recall Statistics Comparison")
+    print("=" * 50)
+
+    # Print header
+    header = "k-value\t" + "\t".join(labels)
+    print(header)
+    print("-" * (len(header) + 20))
+
+    # Print data for each k value
+    k_values = sorted(recall_dicts[0].keys())
+    for k in k_values:
+        row = f"Recall@{k}"
+        for recall_dict in recall_dicts:
+            row += f"\t{recall_dict[k]:.4f}"
+        print(row)
+
+
+def get_file_name(file_path: str) -> str:
+    """Extract file name from path for labeling"""
+    return os.path.basename(file_path).replace('.json', '')
 
 
 def main():
-    # File paths
-    file1_path = "outputs/aliyun_isereal/retrival_results/example_retrieval_results.json"
-    file2_path = "outputs/aliyun_2wiki/retrival_results_bak/example_retrieval_results.json"
+    # File paths list - modify this list as needed
+    file_paths = [
+        "outputs/aliyun_isereal/retrival_results/dpr_example_retrieval_results.json",
+        "outputs/aliyun_isereal/retrival_results/example_retrieval_results.json",
+        "/Users/xumengyao/PycharmProjects/test/recall_analysis_results/detailed_recall_results.json",
+        # Add more file paths here as needed
+    ]
+
+    # Labels for each file (if not provided, will use file names)
+    labels = [
+        "Embedding compare",
+        "HippoRAG",
+        "Elastic Search",
+        # Add more labels here corresponding to file_paths
+    ]
+
+    # Colors for each line in the plot
+    colors = ['blue', 'red', 'green', 'orange', 'purple', 'brown']
 
     try:
-        # Read JSON files
-        data1 = read_json_file(file1_path)
-        data2 = read_json_file(file2_path)
+        # Read all JSON files
+        all_data = []
+        recall_averages = []
 
-        print(f"File 1 contains {len(data1)} items")
-        print(f"File 2 contains {len(data2)} items")
+        print("Reading files:")
+        print("-" * 30)
 
-        # Extract and calculate Recall averages
-        recall_avg1 = extract_recall_values(data1)
-        recall_avg2 = extract_recall_values(data2)
+        for i, file_path in enumerate(file_paths):
+            data = read_json_file(file_path)
+            all_data.append(data)
+            recall_avg = extract_recall_values(data)
+            recall_averages.append(recall_avg)
+
+            # Use provided label or generate from file name
+            if i < len(labels):
+                label = labels[i]
+            else:
+                label = get_file_name(file_path)
+
+            print(f"{label}: {len(data)} items")
 
         # Print statistics
-        print_statistics(recall_avg1, "File 1")
-        print_statistics(recall_avg2, "File 2")
+        print_statistics(recall_averages, labels[:len(file_paths)])
 
         # Plot comparison
-        plot_recall_comparison(recall_avg1, recall_avg2, "Our question", "2wiki Question")
+        plot_recall_comparison(recall_averages, labels[:len(file_paths)], colors)
 
     except FileNotFoundError as e:
         print(f"File not found: {e}")

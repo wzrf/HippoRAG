@@ -3,6 +3,7 @@ from typing import List
 import json
 import argparse
 import logging
+from src.hipporag.utils.es_utils import insert_documents_with_check, search_and_analyze_gold_docs
 
 from src.hipporag import HippoRAG
 
@@ -33,8 +34,29 @@ def read_2wiki_docs(total: int):
     return context_docs, all_questions, all_gold_docs, all_answers
 
 
-def read_own_questions_docs(workdir: str) -> (list[str], list[list[str]]):
+"""
+把根据es查询结果修改关键词的问题增加到原本的questions_sum.json里面
+"""
+def append_own_questions_docs(workdir: str, refined_questions: dict) -> (list[str], list[list[str]]):
+    file_to_save = "questions_sum.json"
+    with open(f"{workdir}/multi_hop/{file_to_save}", 'r', encoding='utf-8') as f:
+        questions = json.load(f)
+        for question in questions:
+            question["refined_question"] = refined_questions[question["question"]]
+        with open(f"{workdir}/multi_hop/{file_to_save}", 'w', encoding='utf-8') as f:
+            json.dump(questions, f,
+                      indent=4,
+                      ensure_ascii=False,  # 确保中文正常显示
+                      sort_keys=True)  # 按键排序
+
+
+
+"""
+把一个个单个的multi_hop_question_xxx.json 汇总成一个大的文件 questions_sum.json，然后返回所有query和gold_docs
+"""
+def read_own_questions_docs(workdir: str) -> (list[str], list[str], list[list[str]]):
     queries = []
+    refined_queries = []
     gold_docs = []
     file_to_save = "questions_sum.json"
     questions_sum = []
@@ -51,13 +73,40 @@ def read_own_questions_docs(workdir: str) -> (list[str], list[list[str]]):
                             docs.append(chunks_list["content"])
                 gold_docs.append(docs)
                 queries.append(data["question"])
+                if "refined_question" in data:
+                    refined_queries.append(data["refined_question"])
                 questions_sum.append(data)
     with open(f"{workdir}/multi_hop/{file_to_save}", 'w', encoding='utf-8') as f:
         json.dump(questions_sum, f,
                   indent=4,
                   ensure_ascii=False,  # 确保中文正常显示
                   sort_keys=True)  # 按键排序
-    return queries, gold_docs
+    return queries, refined_queries, gold_docs
+
+def refine_questions(hipporag, save_dir:str, queries: list[str], gold_docs: list[list[str]]):
+    question_updated = {}
+    for idx in range(len(queries)):
+        es_search_result = search_and_analyze_gold_docs(query_str=queries[idx], gold_docs=gold_docs[idx], index_name="military")
+        inital_rank = [doc["rank"] for doc in es_search_result["gold_docs_analysis"]]
+        question_refined = queries[idx]
+
+        while len(inital_rank)>0:
+            print(f"""ES result for initial question is {inital_rank}""")
+            # return
+
+            question_refined = hipporag.refine_question(es_search_result)
+            es_search_result = search_and_analyze_gold_docs(query_str=question_refined, gold_docs=gold_docs[1], index_name="military")
+            inital_rank = [doc["rank"] for doc in es_search_result["gold_docs_analysis"]]
+            print(f"question_refined is {question_refined}, refined rank is {inital_rank}")
+
+        print(f"hmm finally perfect. question_refined is {question_refined}, refined rank is {inital_rank}")
+        question_updated[queries[idx]] = question_refined
+    print(f"question_updated is {question_updated}")
+
+    append_own_questions_docs(workdir=save_dir, refined_questions=question_updated)
+
+    return
+
 
 def get_all_news_including(keywords: list, repeat_times: int, display_count: int,
                            print_out_and_exit: bool, save_and_exit: bool) -> list:
@@ -145,22 +194,34 @@ def main():
 
 
     # mengyao_debug debug the graph
-    # hipporag.build_graph_and_raise_question(save_directory=save_dir, questions_total=3)
+    """
+    build graph，提出问题；
+    """
+    # hipporag.build_graph_and_raise_question(save_directory=save_dir, questions_total=0);return
 
-    # Run indexing
-    hipporag.index(docs=docs);return;
+    """
+    把所有当前库里面的文档都dump到本地；(用于elastic search检索)
+    """
+    all_docs = hipporag.list_all_documents(save_directory=save_dir)
+    inserted = insert_documents_with_check(index_name="military", documents=all_docs)
+    print(f"inserted {len(inserted)} documents")
+    # return
 
 
-    # queries = all_questions
-    # gold_docs = all_gold_docs
-    queries, gold_docs = read_own_questions_docs(workdir=save_dir)
-    print(f"queries is {queries}")
-    print(f"gold_docs is {gold_docs}")
+    """
+    对新文档进行index
+    """
+    # hipporag.index(docs=docs);return;
 
+    queries, refined_queries, gold_docs = read_own_questions_docs(workdir=save_dir)
+
+    if len(queries) != len(refined_queries):
+        refine_questions(queries=queries, gold_docs=gold_docs, hipporag=hipporag, save_dir=save_dir)
+    queries, refined_queries, gold_docs = read_own_questions_docs(workdir=save_dir)
 
     (queries_solutions, all_response_message, all_metadata,
      overall_retrieval_result, dpr_overall_retrieval_result, dpr_plus_overall_retrieval_result,
-     example_retrieval_results, dpr_example_retrieval_results, dpr_plus_example_retrieval_results) = hipporag.rag_qa(queries=queries,
+     example_retrieval_results, dpr_example_retrieval_results, dpr_plus_example_retrieval_results) = hipporag.rag_qa(queries=refined_queries,
                           gold_docs=gold_docs,
                           gold_answers=None,
                           gold_chunk_id="",

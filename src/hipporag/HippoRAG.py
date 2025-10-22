@@ -615,7 +615,7 @@ class HippoRAG:
             print(f"mengyao_debug question is kept, output is {question_finetuned_json}")
 
             question_rate_prompt = self.prompt_template_manager.render(name='question_rate', passage=question_finetuned)
-            raw_response, metadata, cache_hit = self.llm_model_deepthink.infer(question_rate_prompt)
+            raw_response, metadata, cache_hit = self.llm_model.infer(question_rate_prompt)
             if metadata['finish_reason'] == 'length':
                 question_rate = fix_broken_generated_json(raw_response)
             else:
@@ -627,6 +627,50 @@ class HippoRAG:
             merged_result["chunks_list"] = chunks_list
             with open(f"{save_directory}/multi_hop/multi_hop_question_{index}.json", 'w', encoding='utf-8') as f:
                 json.dump(merged_result, f, ensure_ascii=False, indent=4)
+
+    def list_all_documents(self, save_directory: str) -> list[str]:
+        all_chunks = self.chunk_embedding_store.get_all_id_to_rows()
+        all_docs = []
+        for key, value in all_chunks.items():
+            all_docs.append(value["content"])
+        with open(f"{save_directory}/all_original_text.json", 'w', encoding='utf-8') as f:
+            json.dump(all_chunks, f, ensure_ascii=False, indent=4)
+        return all_docs
+
+
+    def refine_question(self, es_recall: dict):
+        question = es_recall["query"]
+        result_dict = {}
+
+        for doc in es_recall.get('gold_docs_analysis', []):
+            # 检查rank是否小于15
+            if doc.get('rank', float('inf')) < 20:
+                term_weights = doc.get('term_weights', {})
+                sorted_terms = sorted(term_weights.items(), key=lambda x: x[1], reverse=True)[:15]
+                for term, weight in sorted_terms:
+                    if term in result_dict:
+                        result_dict[term] += weight
+                    else:
+                        result_dict[term] = weight
+
+        question_finetuning_prompt = self.prompt_template_manager.render(name='question_refine_es',
+                                                                         question=question, keywords=result_dict)
+        raw_response, metadata, cache_hit = self.llm_model.infer(question_finetuning_prompt)
+        if metadata['finish_reason'] == 'length':
+            question_refined = fix_broken_generated_json(raw_response)
+        else:
+            question_refined = raw_response
+        question_refined = question_refined.replace("```json", "").replace("```", "").strip()
+        try:
+            question_refined_json = json.loads(question_refined)
+            print(f"""[question refined] explanation is {question_refined_json["explain"]}""")
+            return question_refined_json["question"]
+        except Exception as E:
+            print(f"[refine_question] fail to dump, question refine result is {question_refined}, exception {E}")
+            return question
+
+
+
 
     def build_graph_and_raise_question(self, save_directory: str, questions_total=1):
         new_graph = self.graph.copy()
