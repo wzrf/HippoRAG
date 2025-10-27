@@ -37,6 +37,8 @@ from .utils.embed_utils import retrieve_knn
 from .utils.typing import Triple
 from .utils.config_utils import BaseConfig
 from .utils.llm_utils import fix_broken_generated_json
+from .utils.es_utils import insert_documents_with_check, search_and_analyze_gold_docs, \
+    calculate_recall_metrics_for_queries
 
 logger = logging.getLogger(__name__)
 
@@ -596,45 +598,77 @@ class HippoRAG:
         else:
             question_generated = raw_response
 
-        print(f"question_generated is {question_generated}")
-
-        question_finetuning_prompt = self.prompt_template_manager.render(name='question_finetuning',
-                                                                         passage=question_generated)
-        raw_response, metadata, cache_hit = self.llm_model.infer(question_finetuning_prompt)
+        print(f"mengyao_debug question_generated is {question_generated}")
+        question_generated = question_generated.replace("```json", "").replace("```", "").strip()
+        question_generated_json = json.loads(question_generated)
+        question_generated_json["raw_question"] = question_generated_json["question"]
+        question_generated_json["keep"] = True
+        question_generated_json["finetuned"] = False
+        question_generated_json["optimization"] = "无需优化"
+        question_rate_prompt = self.prompt_template_manager.render(name='question_rate', passage=json.dumps(question_generated_json))
+        raw_response, metadata, cache_hit = self.llm_model.infer(question_rate_prompt)
         if metadata['finish_reason'] == 'length':
-            question_finetuned = fix_broken_generated_json(raw_response)
+            question_rate = fix_broken_generated_json(raw_response)
         else:
-            question_finetuned = raw_response
+            question_rate = raw_response
+        question_rate = question_rate.replace("```json", "").replace("```", "").strip()
+        question_rate_json = json.loads(question_rate)
+        print(f"question_rate_json is {question_rate_json}")
+        merged_result = {**question_rate_json, **question_generated_json}
+        merged_result["chunks_list"] = chunks_list
 
-        question_finetuned = question_finetuned.replace("```json", "").replace("```", "").strip()
-        question_finetuned_json = json.loads(question_finetuned)
-        print(f"question_finetuned is {question_finetuned}")
-        if question_finetuned_json["keep"] == False:
-            print(f"mengyao_debug question is dumped, output is {question_finetuned_json}")
-        else:
-            print(f"mengyao_debug question is kept, output is {question_finetuned_json}")
+        print(f"mengyao_debug merged_result is {merged_result}")
+        query = question_generated_json["question"]
+        chunk_ids = question_generated_json["chunk_ids"]
+        gold_docs = []
+        for chunk in chunks_list:
+            if chunk["hash_id"] in chunk_ids:
+                gold_docs.append(chunk["content"])
+        print(f"gold docs is {gold_docs}")
+        es_search_result = search_and_analyze_gold_docs(query_str=query, gold_docs=gold_docs,
+                                                        index_name="military")
+        inital_rank = [doc["rank"] for doc in es_search_result["gold_docs_analysis"]]
+        question_refined = query
 
-            question_rate_prompt = self.prompt_template_manager.render(name='question_rate', passage=question_finetuned)
-            raw_response, metadata, cache_hit = self.llm_model.infer(question_rate_prompt)
-            if metadata['finish_reason'] == 'length':
-                question_rate = fix_broken_generated_json(raw_response)
-            else:
-                question_rate = raw_response
-            question_rate = question_rate.replace("```json", "").replace("```", "").strip()
-            question_rate_json = json.loads(question_rate)
-            print(f"question_rate_json is {question_rate_json}")
-            merged_result = {**question_rate_json, **question_finetuned_json}
-            merged_result["chunks_list"] = chunks_list
-            with open(f"{save_directory}/multi_hop/multi_hop_question_{index}.json", 'w', encoding='utf-8') as f:
-                json.dump(merged_result, f, ensure_ascii=False, indent=4)
+        while len(inital_rank) > 0:
+            print(f"""ES result for initial question is {inital_rank}""")
+            # return
+
+            question_refined = self.refine_question(es_search_result)
+            es_search_result = search_and_analyze_gold_docs(query_str=question_refined, gold_docs=gold_docs,
+                                                            index_name="military")
+            inital_rank = [doc["rank"] for doc in es_search_result["gold_docs_analysis"]]
+            print(f"question_refined is {question_refined}, refined rank is {inital_rank}")
+
+        print(f"hmm finally perfect. question_refined is {question_refined}, refined rank is {inital_rank}")
+        es_search_result_final = search_and_analyze_gold_docs(query_str=question_refined, gold_docs=gold_docs,
+                                                        index_name="military", rank_thresh=200)
+
+        merged_result["refined_question"] = question_refined
+        merged_result["es_search_result_final"] = es_search_result_final
+        print(f"mengyao_debug merged_result is {merged_result}")
+        with open(f"{save_directory}/multi_hop/multi_hop_question_{index}.json", 'w', encoding='utf-8') as f:
+            json.dump(merged_result, f, ensure_ascii=False, indent=4)
 
     def list_all_documents(self, save_directory: str) -> list[str]:
         all_chunks = self.chunk_embedding_store.get_all_id_to_rows()
         all_docs = []
+        all_docs_JY = []
         for key, value in all_chunks.items():
             all_docs.append(value["content"])
+            all_docs_JY.append({
+                "id": 1,
+                "text": value["content"],
+                "metadata": {
+                    "lang": "zh-CN"
+                }
+            })
+
+        all_docs_JY = all_docs_JY[:10]
         with open(f"{save_directory}/all_original_text.json", 'w', encoding='utf-8') as f:
             json.dump(all_chunks, f, ensure_ascii=False, indent=4)
+        with open(f"{save_directory}/all_original_text_JY.json", 'w', encoding='utf-8') as f:
+            json.dump(all_docs_JY, f, ensure_ascii=False, indent=4)
         return all_docs
 
 
@@ -812,13 +846,13 @@ class HippoRAG:
             plt.close()
             print(f"mengyao_debug draw_graph graph is {graph}")
 
-        def find_max_index_glob(folder_path):
+        def find_max_index_glob(folder_path) -> int:
             # 使用glob模式匹配文件
             pattern = os.path.join(folder_path, "multi_hop_question_*.json")
             files = glob.glob(pattern)
 
             if not files:
-                return None
+                return 0
 
             # 提取数字并找到最大值
             indices = []
@@ -828,7 +862,7 @@ class HippoRAG:
                 if match:
                     indices.append(int(match.group(1)))
 
-            return max(indices) if indices else None
+            return max(indices) if indices else 0
 
         def generate_multihop(index: int) -> bool:
             node_without_usable_edges = set()
@@ -2232,9 +2266,22 @@ class HippoRAG:
         文章和问题之间的相关性；
         """
         dpr_sorted_doc_ids, dpr_sorted_doc_scores = self.dense_passage_retrieval(query)
-        all_facts_paragraph = " ".join([" ".join(fact) for fact in top_k_facts])
+        print(f"mengyao_debug top_k_facts first is {top_k_facts}")
+        all_facts_paragraph = ". ".join([" ".join(fact) for fact in top_k_facts])
         query_with_fact = f"{all_facts_paragraph} {query}"
         print(f"query_with_fact is {query_with_fact}")
+
+        """
+        let's do some test
+        """
+        # query_fact_scores = self.get_fact_scores(query_with_fact)
+        # print(f"query_fact_scores is {query_fact_scores}")
+        # top_k_fact_indices_second, top_k_facts_second, rerank_log_second = self.rerank_facts(query_with_fact, query_fact_scores, link_top_k=self.global_config.linking_top_k+len(top_k_facts))
+        # top_k_facts_second.extend(top_k_facts)
+        # top_k_facts_second = list(set(top_k_facts_second))
+        # print(f"mengyao_debug top_k_facts_second is {top_k_facts_second}")
+
+
         dpr_plus_sorted_doc_ids, dpr_plus_sorted_doc_scores = self.dense_passage_retrieval(query_with_fact)
         normalized_dpr_sorted_scores = min_max_normalize(dpr_sorted_doc_scores)
         # print(f"mengyao_debug dpr_sorted_doc_ids are {dpr_sorted_doc_ids}")
@@ -2336,7 +2383,7 @@ class HippoRAG:
 
         return dpr_sorted_doc_ids, dpr_sorted_doc_scores, dpr_plus_sorted_doc_ids, dpr_plus_sorted_doc_scores, ppr_sorted_doc_ids, ppr_sorted_doc_scores
 
-    def rerank_facts(self, query: str, query_fact_scores: np.ndarray) -> Tuple[List[int], List[Tuple], dict]:
+    def rerank_facts(self, query: str, query_fact_scores: np.ndarray, link_top_k=None) -> Tuple[List[int], List[Tuple], dict]:
         """
 
         Args:
@@ -2351,7 +2398,8 @@ class HippoRAG:
 
         """
         # load args
-        link_top_k: int = self.global_config.linking_top_k
+        if link_top_k is None:
+            link_top_k: int = self.global_config.linking_top_k
 
         """
         mengyao_debug query_fact_scores is [0.13013543 0.40800445 1.         0.10302908 0.03689147 0.29024954

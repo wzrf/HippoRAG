@@ -158,3 +158,76 @@ def search_and_analyze_gold_docs(index_name, query_str, gold_docs, rank_thresh=1
             "gold_docs_analysis": []
         }
 
+
+def calculate_recall_metrics_for_queries(index_name, queries, gold_docs_list, field_name="data", size=200):
+    """
+    针对每个query计算对应gold_docs的召回率
+
+    Args:
+        es_client: Elasticsearch客户端实例
+        index_name: 索引名称
+        queries: 查询字符串列表
+        gold_docs_list: gold文档列表的列表，每个元素对应一个查询的gold文档
+        field_name: 搜索的字段名，默认为"data"
+        size: 返回结果数量，默认为200
+
+    Returns:
+        list: 每个查询的召回率字典列表
+    """
+
+    # 定义召回率阈值
+    recall_thresholds = [1, 2, 5, 10, 20, 30, 50, 100, 150, 200]
+
+    # 确保输入长度一致
+    if len(queries) != len(gold_docs_list):
+        raise ValueError("queries和gold_docs_list的长度必须一致")
+
+    all_recall_metrics = []
+
+    for i, (query, gold_docs) in enumerate(zip(queries, gold_docs_list)):
+        print(f"处理查询 {i + 1}/{len(queries)}: '{query}'")
+
+        # 构建查询
+        search_query = {
+            "query": {
+                "match": {
+                    field_name: query
+                }
+            },
+            "size": size
+        }
+
+        try:
+            # 执行搜索
+            response = es_client.search(index=index_name, body=search_query)
+            retrieved_docs = [hit["_source"][field_name] for hit in response["hits"]["hits"]]
+
+            # 计算各阈值的召回率
+            recall_metrics = {}
+            for k in recall_thresholds:
+                recall_key = f"Recall@{k}"
+
+                if len(gold_docs) == 0:
+                    # 如果没有gold文档，召回率为0
+                    recall_metrics[recall_key] = 0.0
+                else:
+                    # 计算前k个结果中的gold文档数量
+                    top_k_docs = retrieved_docs[:k]
+                    recalled_count = sum(1 for doc in top_k_docs if doc in gold_docs)
+                    recall_metrics[recall_key] = recalled_count / len(gold_docs)
+
+            all_recall_metrics.append(recall_metrics)
+
+            # 打印当前查询的简要结果
+            print(f"  找到 {len(retrieved_docs)} 个文档，Gold文档数: {len(gold_docs)}")
+            print(
+                f"  最佳召回率: Recall@{min(recall_thresholds)} = {recall_metrics[f'Recall@{min(recall_thresholds)}']:.4f}")
+
+        except Exception as e:
+            print(f"查询 '{query}' 失败: {e}")
+            # 如果查询失败，返回所有召回率为0
+            recall_metrics = {f"Recall@{k}": 0.0 for k in recall_thresholds}
+            all_recall_metrics.append(recall_metrics)
+
+    return all_recall_metrics
+
