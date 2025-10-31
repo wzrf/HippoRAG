@@ -10,6 +10,11 @@ from src.hipporag import HippoRAG
 
 logger = logging.getLogger(__name__)
 
+llm_model_name = 'deepseek-v3'  # Any OpenAI model name
+llm_model_name_deepthink = 'deepseek-r1'  # Any OpenAI model name
+embedding_model_name = 'text-embedding-v4'  # Embedding model name (NV-Embed, GritLM or Contriever for now)
+aliyun_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
 
 def read_2wiki_docs(total: int):
     with open('/Users/xumengyao/work/QIYUAN/2wikiQA/data/train.json', 'r', encoding='utf-8') as f:
@@ -41,14 +46,17 @@ def read_2wiki_docs(total: int):
 """
 
 
-def append_own_questions_docs(workdir: str, refined_questions: dict) -> (list[str], list[list[str]]):
-    file_to_save = "questions_sum.json"
+def read_own_questions_docs(workdir: str) -> (list[str], list[list[str]]):
+    file_to_read_from = "questions_sum.json"
+    file_format = "questions_format.json"
+    refined_file_format = "refined_questions_format.json"
     queries = []
     gold_docs = []
-    with open(f"{workdir}/multi_hop/{file_to_save}", 'r', encoding='utf-8') as f:
+    questions_format = []
+    refined_questions_format = []
+    with open(f"{workdir}/multi_hop/{file_to_read_from}", 'r', encoding='utf-8') as f:
         questions = json.load(f)
         for question in questions:
-            question["refined_question"] = refined_questions[question["question"]]
             queries.append(question["refined_question"])
             docs = []
             chunks_lists = question["chunks_list"]
@@ -58,23 +66,27 @@ def append_own_questions_docs(workdir: str, refined_questions: dict) -> (list[st
                     if chunk_id == chunks_list["hash_id"]:
                         docs.append(chunks_list["content"])
             gold_docs.append(docs)
-
-        with open(f"{workdir}/multi_hop/{file_to_save}", 'w', encoding='utf-8') as f:
-            json.dump(questions, f,
-                      indent=4,
-                      ensure_ascii=False,  # 确保中文正常显示
-                      sort_keys=True)  # 按键排序
-
-            return queries, gold_docs
-
+            questions_format.append({
+                "question": question["question"],
+                "gold_docs": docs
+            })
+            refined_questions_format.append({
+                "question": question["refined_question"],
+                "gold_docs": docs
+            })
+        with open(f"{workdir}/multi_hop/{file_format}", 'w', encoding='utf-8') as f_format:
+            json.dump(questions_format, f_format, indent=4, ensure_ascii=False)
+        with open(f"{workdir}/multi_hop/{refined_file_format}", 'w', encoding='utf-8') as refined_f_format:
+            json.dump(refined_questions_format, refined_f_format, indent=4, ensure_ascii=False)
+        return queries, gold_docs
 
 
 """
-把一个个单个的multi_hop_question_xxx.json 汇总成一个大的文件 questions_sum.json，然后返回所有query和gold_docs
+读取所有multi_hop_questions...合并成一个大的 questions_sum.json，然后返回所有query和gold_docs
 """
 
 
-def read_own_questions_docs(workdir: str, dump_to_local: bool) -> (list[str], list[str], list[list[str]]):
+def append_own_questions_docs(workdir: str):
     queries = []
     refined_queries = []
     gold_docs = []
@@ -96,39 +108,22 @@ def read_own_questions_docs(workdir: str, dump_to_local: bool) -> (list[str], li
                 if "refined_question" in data:
                     refined_queries.append(data["refined_question"])
                 questions_sum.append(data)
-    if dump_to_local:
-        with open(f"{workdir}/multi_hop/{file_to_save}", 'w', encoding='utf-8') as f:
-            json.dump(questions_sum, f,
-                      indent=4,
-                      ensure_ascii=False,  # 确保中文正常显示
-                      sort_keys=True)  # 按键排序
-    return queries, refined_queries, gold_docs
 
+    with open(f"{workdir}/multi_hop/{file_to_save}", 'r', encoding='utf-8') as f:
+        old_questions = json.load(f)
+        questions_sum.extend(old_questions)
 
-def refine_questions(hipporag, save_dir: str, queries: list[str], gold_docs: list[list[str]]) -> \
-        (list[str], list[list[str]]):
-    question_updated = {}
-    for idx in range(len(queries)):
-        es_search_result = search_and_analyze_gold_docs(query_str=queries[idx], gold_docs=gold_docs[idx],
-                                                        index_name="military")
-        inital_rank = [doc["rank"] for doc in es_search_result["gold_docs_analysis"]]
-        question_refined = queries[idx]
+    seen_questions = set()
+    questions_sum = [item for item in questions_sum
+                     if not (item.get('refined_question') in seen_questions or
+                             seen_questions.add(item.get('refined_question')))]
+    print(f"mengyao_debug questions_sum total is {len(questions_sum)}")
 
-        while len(inital_rank) > 0:
-            print(f"""ES result for initial question is {inital_rank}""")
-            # return
-
-            question_refined = hipporag.refine_question(es_search_result)
-            es_search_result = search_and_analyze_gold_docs(query_str=question_refined, gold_docs=gold_docs[idx],
-                                                            index_name="military")
-            inital_rank = [doc["rank"] for doc in es_search_result["gold_docs_analysis"]]
-            print(f"question_refined is {question_refined}, refined rank is {inital_rank}")
-
-        print(f"hmm finally perfect. question_refined is {question_refined}, refined rank is {inital_rank}")
-        question_updated[queries[idx]] = question_refined
-    print(f"question_updated is {question_updated}")
-
-    return append_own_questions_docs(workdir=save_dir, refined_questions=question_updated)
+    with open(f"{workdir}/multi_hop/{file_to_save}", 'w', encoding='utf-8') as f:
+        json.dump(questions_sum, f,
+                  indent=4,
+                  ensure_ascii=False,  # 确保中文正常显示
+                  sort_keys=True)  # 按键排序
 
 
 def get_all_news_including(keywords: list, repeat_times: int, display_count: int,
@@ -190,28 +185,51 @@ def compare_retrival_result(retrieval_res: dict, retrieval_res_dpr: dict, questi
         print(f"对于问题 【{question}】，检索效果不变 recall10 {retrieval_res_dpr_recall10}")
 
 
-def main():
-    # Prepare datasets and evaluation
+def es_search(queries: list, gold_docs: list[list[str]], index_name: str):
+    for idx, query in enumerate(queries):
+        es_search_result = (
+            search_and_analyze_gold_docs(query_str=query, gold_docs=gold_docs[idx],
+                                         index_name=index_name))
+        print(f"mengyao_debug es_search_result is {es_search_result}")
 
-    docs = get_all_news_including(["袭击"], 1, 50,
+
+def save_result_to_local(save_dir: str, queries: list[str], retrieval_results, dpr_retrieval_results,
+                         dpr_plus_retrieval_results):
+    try:
+        os.mkdir(f"{save_dir}/retrival_results")
+    except Exception as E:
+        print(E)
+
+    ### 保存到本地
+    with open(f"{save_dir}/retrival_results/retrieval_results.json", 'w', encoding='utf-8') as f:
+        json.dump(retrieval_results, f,
+                  indent=4,
+                  ensure_ascii=False,  # 确保中文正常显示
+                  sort_keys=True)  # 按键排序
+
+    with open(f"{save_dir}/retrival_results/dpr_retrieval_results.json", 'w', encoding='utf-8') as f:
+        json.dump(dpr_retrieval_results, f,
+                  indent=4,
+                  ensure_ascii=False,  # 确保中文正常显示
+                  sort_keys=True)  # 按键排序
+
+    with open(f"{save_dir}/retrival_results/dpr_plus_retrieval_results.json", 'w', encoding='utf-8') as f:
+        json.dump(dpr_plus_retrieval_results, f,
+                  indent=4,
+                  ensure_ascii=False,  # 确保中文正常显示
+                  sort_keys=True)  # 按键排序
+
+    compare_retrival_results(retrieval_results, dpr_retrieval_results, queries)
+
+
+def build_graph_and_raise_questions(questions_total=1, keyword=""):
+    docs = get_all_news_including(["中东"], 1, 1,
                                   False, False)
+
     print(f"总共文档数量是 {len(docs)}")
 
-    # docs = docs[0:100]
+    save_dir = f'outputs/aliyun_{keyword}'  # Define save directory for HippoRAG objects (each LLM/Embedding model combination will create a new subdirectory)
 
-    docs, queries, gold_docs, all_answers = read_2wiki_docs(1)
-    refined_queries = queries
-    # print(f"总共文档数量是 {len(docs)}")
-    # print(f"all questions are {queries}")
-    # print(f"all gold docs  are {gold_docs}")
-
-    save_dir = 'outputs/aliyun_2wiki'  # Define save directory for HippoRAG objects (each LLM/Embedding model combination will create a new subdirectory)
-    llm_model_name = 'deepseek-v3'  # Any OpenAI model name
-    llm_model_name_deepthink = 'deepseek-r1'  # Any OpenAI model name
-    embedding_model_name = 'text-embedding-v4'  # Embedding model name (NV-Embed, GritLM or Contriever for now)
-    aliyun_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-
-    # Startup a HippoRAG instance
     hipporag = HippoRAG(save_dir=save_dir,
                         llm_model_name=llm_model_name,
                         llm_base_url=aliyun_url,
@@ -219,82 +237,75 @@ def main():
                         embedding_base_url=aliyun_url,
                         llm_model_name_deepthink=llm_model_name_deepthink)
 
+    hipporag.index(docs)
+
+    all_docs = hipporag.list_all_documents(save_directory=save_dir)
     """
     把所有当前库里面的文档都dump到本地；(用于elastic search检索)
     """
-    # all_docs = hipporag.list_all_documents(save_directory=save_dir)
+    inserted = insert_documents_with_check(index_name="military", documents=all_docs)
 
-    # inserted = insert_documents_with_check(index_name="military", documents=all_docs)
-    # print(f"inserted {len(inserted)} documents")
-    # return
+    hipporag.build_graph_and_raise_question(save_directory=save_dir, questions_total=questions_total)
 
-    # mengyao_debug debug the graph
-    """
-    build graph，提出问题；
-    """
-    # hipporag.build_graph_and_raise_question(save_directory=save_dir, questions_total=1);return
 
-    # return
+def retrieve_2wiki():
+    docs, queries, gold_docs, all_answers = read_2wiki_docs(200)
+    print(f"mengyao_debug 2wiki docs length is {len(docs)}, gold_docs length is {len(gold_docs)}")
+    save_dir = 'outputs/aliyun_2wiki'  # Define save directory for HippoRAG objects (each LLM/Embedding model combination will create a new subdirectory)
+    hipporag = HippoRAG(save_dir=save_dir,
+                        llm_model_name=llm_model_name,
+                        llm_base_url=aliyun_url,
+                        embedding_model_name=embedding_model_name,
+                        embedding_base_url=aliyun_url,
+                        llm_model_name_deepthink=llm_model_name_deepthink)
+    print(f"mengyao_debug read {len(queries)} queries, {len(gold_docs)} gold_docs")
 
-    """
-    对新文档进行ES index
-    """
-    # hipporag.index(docs=docs);return;
+    hipporag.index(docs)
+    hipporag.list_all_documents(save_directory=save_dir)
+    return
 
-    """
-    这个是读自己创建的问题，并且用ES召回
-    """
-    # queries, refined_queries, gold_docs = read_own_questions_docs(workdir=save_dir, dump_to_local=False)
-    # print(f"refined_queries is {len(refined_queries)}")
-    # if len(queries) != len(refined_queries):
-    #     refined_queries, gold_docs = refine_questions(queries=queries, gold_docs=gold_docs, hipporag=hipporag,
-    #                                                   save_dir=save_dir)
-    # es_retrieve_res = calculate_recall_metrics_for_queries(index_name="military", queries=refined_queries,
-    #                                                        gold_docs_list=gold_docs)
-    # with open(f"{save_dir}/retrival_results/es_retrieve_res.json", 'w', encoding='utf-8') as f:
-    #     json.dump(es_retrieve_res, f,
-    #               indent=4,
-    #               ensure_ascii=False,  # 确保中文正常显示
-    #               sort_keys=True)  # 按键排序
+    es_search(queries=queries, gold_docs=gold_docs, index_name="2wiki")
 
     (queries_solutions, all_response_message, all_metadata,
      overall_retrieval_result, dpr_overall_retrieval_result, dpr_plus_overall_retrieval_result,
-     example_retrieval_results, dpr_example_retrieval_results, dpr_plus_example_retrieval_results) = hipporag.rag_qa(
-        queries=refined_queries,
+     retrieval_results, dpr_retrieval_results, dpr_plus_retrieval_results) = hipporag.rag_qa(
+        queries=queries,
         gold_docs=gold_docs,
         gold_answers=None,
         gold_chunk_id="",
         all_gold_chunk_ids=[])
 
-    print(f"mengyao_debug example_retrieval_results is {example_retrieval_results}")
-    print(f"mengyao_debug dpr_example_retrieval_results is {dpr_example_retrieval_results}")
+    save_result_to_local(retrieval_results=retrieval_results, dpr_retrieval_results=dpr_retrieval_results,
+                         dpr_plus_retrieval_results=dpr_plus_retrieval_results, queries=queries, save_dir=save_dir)
 
-    try:
-        os.mkdir(f"{save_dir}/retrival_results")
-    except Exception as E:
-        print(E)
 
-    ### 保存到本地
-    with open(f"{save_dir}/retrival_results/example_retrieval_results.json", 'w', encoding='utf-8') as f:
-        json.dump(example_retrieval_results, f,
-                  indent=4,
-                  ensure_ascii=False,  # 确保中文正常显示
-                  sort_keys=True)  # 按键排序
+def retrieve_military():
+    save_dir = 'outputs/aliyun_isereal'  # Define save directory for HippoRAG objects (each LLM/Embedding model combination will create a new subdirectory)
+    hipporag = HippoRAG(save_dir=save_dir,
+                        llm_model_name=llm_model_name,
+                        llm_base_url=aliyun_url,
+                        embedding_model_name=embedding_model_name,
+                        embedding_base_url=aliyun_url,
+                        llm_model_name_deepthink=llm_model_name_deepthink)
 
-    with open(f"{save_dir}/retrival_results/dpr_example_retrieval_results.json", 'w', encoding='utf-8') as f:
-        json.dump(dpr_example_retrieval_results, f,
-                  indent=4,
-                  ensure_ascii=False,  # 确保中文正常显示
-                  sort_keys=True)  # 按键排序
+    # queries, gold_docs = read_own_questions_docs(save_dir)
+    hipporag.list_all_documents(save_directory=save_dir)
+    return
+    (queries_solutions, all_response_message, all_metadata,
+     overall_retrieval_result, dpr_overall_retrieval_result, dpr_plus_overall_retrieval_result,
+     retrieval_results, dpr_retrieval_results, dpr_plus_retrieval_results) = hipporag.rag_qa(
+        queries=queries,
+        gold_docs=gold_docs,
+        gold_answers=None,
+        gold_chunk_id="",
+        all_gold_chunk_ids=[])
 
-    with open(f"{save_dir}/retrival_results/dpr_plus_example_retrieval_results.json", 'w', encoding='utf-8') as f:
-        json.dump(dpr_plus_example_retrieval_results, f,
-                  indent=4,
-                  ensure_ascii=False,  # 确保中文正常显示
-                  sort_keys=True)  # 按键排序
-
-    compare_retrival_results(example_retrieval_results, dpr_example_retrieval_results, queries)
+    save_result_to_local(retrieval_results=retrieval_results, dpr_retrieval_results=dpr_retrieval_results,
+                         dpr_plus_retrieval_results=dpr_plus_retrieval_results, queries=queries, save_dir=save_dir)
 
 
 if __name__ == "__main__":
-    main()
+    # retrieve_military()
+
+    # append_own_questions_docs("outputs/aliyun_isereal")
+    build_graph_and_raise_questions(questions_total=10, keyword="isereal")

@@ -5,6 +5,7 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from typing import Union, Optional, List, Set, Dict, Any, Tuple, Literal
 import numpy as np
+import threading
 import random
 import glob
 import importlib
@@ -261,7 +262,7 @@ class HippoRAG:
         docs：原始文本
         """
 
-        print(f"mengyao_debug docs are {docs}, inserting into chunk_embedding_store")
+        # print(f"mengyao_debug docs are {docs}, inserting into chunk_embedding_store")
         self.chunk_embedding_store.insert_strings(docs)
         """
         hash_id -> text
@@ -271,9 +272,9 @@ class HippoRAG:
         all_openie_info, chunk_keys_to_process = self.load_existing_openie(chunk_to_rows.keys())
         new_openie_rows = {k: chunk_to_rows[k] for k in chunk_keys_to_process}
 
-        print(f"mengyao_debug all_openie_info is {all_openie_info}")
-        print(f"mengyao_debug chunk_keys_to_process is {chunk_keys_to_process}")
-        print(f"mengyao_debug new_openie_rows is {new_openie_rows}")
+        # print(f"mengyao_debug all_openie_info is {all_openie_info}")
+        # print(f"mengyao_debug chunk_keys_to_process is {chunk_keys_to_process}")
+        # print(f"mengyao_debug new_openie_rows is {new_openie_rows}")
 
         ### 查询 triplets
         if len(chunk_keys_to_process) > 0:
@@ -285,8 +286,8 @@ class HippoRAG:
             self.save_openie_results(all_openie_info)
 
         ner_results_dict, triple_results_dict = reformat_openie_results(all_openie_info)
-        print(f"mengyao_debug ner_results_dict is {ner_results_dict}")
-        print(f"mengyao_debug triple_results_dict is {triple_results_dict}")
+        # print(f"mengyao_debug ner_results_dict is {ner_results_dict}")
+        # print(f"mengyao_debug triple_results_dict is {triple_results_dict}")
 
         assert len(chunk_to_rows) == len(ner_results_dict) == len(
             triple_results_dict), f"len(chunk_to_rows): {len(chunk_to_rows)}, len(ner_results_dict): {len(ner_results_dict)}, len(triple_results_dict): {len(triple_results_dict)}"
@@ -295,13 +296,13 @@ class HippoRAG:
         chunk_ids = list(chunk_to_rows.keys())
 
         chunk_triples = [[text_processing(t) for t in triple_results_dict[chunk_id].triples] for chunk_id in chunk_ids]
-        print(f"mengyao_debug chunk_triples is {chunk_triples}")
+        # print(f"mengyao_debug chunk_triples is {chunk_triples}")
         entity_nodes, chunk_triple_entities = extract_entity_nodes(chunk_triples)
         facts = flatten_facts(chunk_triples)
 
-        print(f"mengyao_debug entity_nodes is {entity_nodes}\n"
-              f"chunk_triple_entities is {chunk_triple_entities}\n"
-              f"facts is {facts}")
+        # print(f"mengyao_debug entity_nodes is {entity_nodes}\n"
+        #       f"chunk_triple_entities is {chunk_triple_entities}\n"
+        #       f"facts is {facts}")
 
         logger.info(f"Encoding Entities")
 
@@ -581,6 +582,7 @@ class HippoRAG:
         """
         step 1: let the LLM extract all facts.
         """
+        print(f"mengyao_debug raise_question {index}")
         chunks_list = multi_hop_result["chunks_list"]
         fact_extract_prompt = self.prompt_template_manager.render(name='fact_extract', passage=chunks_list)
         print(f"mengyao_debug fact_extract_prompt is {fact_extract_prompt}")
@@ -590,6 +592,12 @@ class HippoRAG:
         else:
             real_response = raw_response
         print(f"fact extract raw_response is {real_response}")
+        total_fact_list = {}
+        try:
+            fact_list = json.loads(real_response.replace("```json", "").replace("```", "").strip())
+            total_fact_list = fact_list
+        except Exception as E:
+            print(f"mengyao_debug fact extract result {E}")
         question_generation_prompt = self.prompt_template_manager.render(name='question_generation',
                                                                          passage=real_response)
         raw_response, metadata, cache_hit = self.llm_model_deepthink.infer(question_generation_prompt)
@@ -630,7 +638,8 @@ class HippoRAG:
         inital_rank = [doc["rank"] for doc in es_search_result["gold_docs_analysis"]]
         question_refined = query
 
-        while len(inital_rank) > 0:
+        ## todo fixme: mengyao_debug just try once
+        if len(inital_rank) > 0:
             print(f"""ES result for initial question is {inital_rank}""")
             # return
 
@@ -646,12 +655,14 @@ class HippoRAG:
 
         merged_result["refined_question"] = question_refined
         merged_result["es_search_result_final"] = es_search_result_final
+        merged_result["total_fact_list"] = total_fact_list
         print(f"mengyao_debug merged_result is {merged_result}")
         with open(f"{save_directory}/multi_hop/multi_hop_question_{index}.json", 'w', encoding='utf-8') as f:
             json.dump(merged_result, f, ensure_ascii=False, indent=4)
 
     def list_all_documents(self, save_directory: str) -> list[str]:
         all_chunks = self.chunk_embedding_store.get_all_id_to_rows()
+        print(f"mengyao_debug all_chunks length is {len(all_chunks)}")
         all_docs = []
         all_docs_JY = []
         for key, value in all_chunks.items():
@@ -664,7 +675,6 @@ class HippoRAG:
                 }
             })
 
-        all_docs_JY = all_docs_JY[:10]
         with open(f"{save_directory}/all_original_text.json", 'w', encoding='utf-8') as f:
             json.dump(all_chunks, f, ensure_ascii=False, indent=4)
         with open(f"{save_directory}/all_original_text_JY.json", 'w', encoding='utf-8') as f:
@@ -708,11 +718,6 @@ class HippoRAG:
 
     def build_graph_and_raise_question(self, save_directory: str, questions_total=1):
         new_graph = self.graph.copy()
-
-        # print(f"mengyao_debug entity_embedding_store are {self.entity_embedding_store.get_all_id_to_rows()}")
-        # print(f"mengyao_debug fact_embedding_store are {self.fact_embedding_store.get_all_id_to_rows()}")
-        # print(f"mengyao_debug chunk_embedding_store are {self.chunk_embedding_store.get_all_id_to_rows()}")
-        # print(f"""mengyao_debug self.graph.vs["name"] are {self.graph.vs["name"]}""")
 
         vertices = new_graph.vs
         print("所有顶点:", vertices["name"])
@@ -842,7 +847,7 @@ class HippoRAG:
                     )
 
             # plt.show()
-            plt.savefig(f"{save_directory}/multi_hop/multi_hop_{index}.jpeg", dpi=600)
+            # plt.savefig(f"{save_directory}/multi_hop/multi_hop_{index}.jpeg", dpi=600)
             plt.close()
             print(f"mengyao_debug draw_graph graph is {graph}")
 
@@ -864,7 +869,7 @@ class HippoRAG:
 
             return max(indices) if indices else 0
 
-        def generate_multihop(index: int) -> bool:
+        def generate_multihop(total: int) -> bool:
             node_without_usable_edges = set()
             chunks_found = set()
             chunks_list = []
@@ -986,26 +991,38 @@ class HippoRAG:
                 os.makedirs(f"{save_directory}/multi_hop")
             except Exception as E:
                 print("already exist.")
-            index_save = find_max_index_glob(f"{save_directory}/multi_hop") + 1
-            print(f"save to index {index_save}")
-            try:
-                draw_graph(new_nodes, valid_edges, valid_attributes, index_save)
-            except Exception as E:
-                print(f"fail to draw a picture, reason is {E}")
-            with open(f"{save_directory}/multi_hop/multi_hop_{index_save}.json", 'w', encoding='utf-8') as f:
-                json.dump(result, f, ensure_ascii=False, indent=4)
+            index_current = find_max_index_glob(f"{save_directory}/multi_hop") + 1
+            all_threads = []
+            for index_save in range(index_current, index_current+total):
+                print(f"save to index {index_save}")
+                try:
+                    draw_graph(new_nodes, valid_edges, valid_attributes, index_save)
+                except Exception as E:
+                    print(f"fail to draw a picture, reason is {E}")
+                # with open(f"{save_directory}/multi_hop/multi_hop_{index_save}.json", 'w', encoding='utf-8') as f:
+                #     json.dump(result, f, ensure_ascii=False, indent=4)
 
-            ## raise a question
-            self.raise_question(multi_hop_result=result, save_directory=save_directory, index=index_save)
+                ## raise a question
+                # self.raise_question(multi_hop_result=result, save_directory=save_directory, index=index_save)
+
+                thread = threading.Thread(
+                    target=self.raise_question,
+                    args=(result, save_directory, index_save),
+                    daemon=True  # 设置为守护线程，主程序退出时自动结束
+                )
+                thread.start()
+                all_threads.append(thread)
+
+            for t in all_threads:
+                t.join()
+                print(f"mengyao_debug finish generate a question")
 
             return True
 
-        questions_generated = 0
-        while questions_generated < questions_total:
-            if generate_multihop(questions_generated):
-                questions_generated += 1
-            else:
-                print("try again.")
+
+        while generate_multihop(questions_total) is False:
+            print("retrying generate_multihop")
+        print("finish generate!")
 
     def rag_qa(self,
                queries: List[str | QuerySolution],
@@ -2267,7 +2284,7 @@ class HippoRAG:
         """
         dpr_sorted_doc_ids, dpr_sorted_doc_scores = self.dense_passage_retrieval(query)
         print(f"mengyao_debug top_k_facts first is {top_k_facts}")
-        all_facts_paragraph = ". ".join([" ".join(fact) for fact in top_k_facts])
+        all_facts_paragraph = "\n ".join([" ".join(fact) for fact in top_k_facts])
         query_with_fact = f"{all_facts_paragraph} {query}"
         print(f"query_with_fact is {query_with_fact}")
 

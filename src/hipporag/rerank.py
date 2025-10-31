@@ -120,6 +120,12 @@ class DSPyFilter:
         except Exception as e:
             print('exception', e)
             generated_facts = []
+
+        ##todo fixme mengyao_debug 这里修改了rerank的逻辑
+        # generated_facts = candidate_items
+        # len_after_rerank = len(candidate_items)
+        # print(f"mengyao_debug generated_facts is {len(generated_facts)}, len_after_rerank is {len_after_rerank}")
+
         result_indices = []
         for generated_fact in generated_facts:
             closest_matched_fact = difflib.get_close_matches(str(generated_fact), [str(i) for i in candidate_items], n=1, cutoff=0.0)[0]

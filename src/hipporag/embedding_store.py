@@ -71,7 +71,7 @@ class EmbeddingStore:
         for text in texts:
             nodes_dict[compute_mdhash_id(text, prefix=self.namespace + "-")] = {'content': text}
 
-        print(f"nodes_dict is {nodes_dict}")
+        # print(f"nodes_dict is {nodes_dict}")
         # Get all hash_ids from the input dictionary.
         all_hash_ids = list(nodes_dict.keys())
         if not all_hash_ids:
