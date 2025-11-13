@@ -1,6 +1,6 @@
 hipporag2/*
 .idea/*
-
+result/
 # Ignore test files
 test_example.py
 test_example.ipynb
@@ -21,3 +21,4 @@ data/
 clear_outputs_and_logs.sh
 # Ignore the env file
 .env
+venv-3.10/

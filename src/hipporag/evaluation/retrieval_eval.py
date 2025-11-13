@@ -19,11 +19,13 @@ class RetrievalRecall(BaseMetric):
     
     def __init__(self, global_config: Optional[BaseConfig] = None):
         super().__init__(global_config)
-        
-    
-    def calculate_metric_scores(self, gold_docs: List[List[str]], retrieved_docs: List[List[str]], k_list: List[int] = [1, 5, 10, 20]) -> Tuple[Dict[str, float], List[Dict[str, float]]]:
+
+    def calculate_metric_scores(self, gold_docs: List[List[str]], retrieved_docs: List[List[str]],
+                                k_list: List[int] = [1, 5, 10, 20]) -> (
+            Tuple)[Dict[str, float], List[Dict[str, float]]]:
         """
         Calculates Recall@k for each example and pools results for all queries.
+        Supports substring matching where a retrieved doc can be a substring of a gold doc.
 
         Args:
             gold_docs (List[List[str]]): List of lists containing the ground truth (relevant documents) for each query.
@@ -31,35 +33,53 @@ class RetrievalRecall(BaseMetric):
             k_list (List[int]): List of k values to calculate Recall@k for.
 
         Returns:
-            Tuple[Dict[str, float], List[Dict[str, float]]]: 
+            Tuple[Dict[str, float], List[Dict[str, float]]]:
                 - A pooled dictionary with the averaged Recall@k across all examples.
                 - A list of dictionaries with Recall@k for each example.
         """
         k_list = sorted(set(k_list))
-        
+
         example_eval_results = []
         pooled_eval_results = {f"Recall@{k}": 0.0 for k in k_list}
+
         for example_gold_docs, example_retrieved_docs in zip(gold_docs, retrieved_docs):
             if len(example_retrieved_docs) < k_list[-1]:
-                logger.warning(f"Length of retrieved docs ({len(example_retrieved_docs)}) is smaller than largest topk for recall score ({k_list[-1]})")
-            
+                logger.warning(
+                    f"Length of retrieved docs ({len(example_retrieved_docs)}) is smaller than largest topk for recall score ({k_list[-1]})")
+
             example_eval_result = {f"Recall@{k}": 0.0 for k in k_list}
-  
+
+            # Pre-process gold documents for efficient substring matching
+            # We'll track which gold docs are matched by any retrieved doc
+            gold_docs_matched = set()
+
             # Compute Recall@k for each k
             for k in k_list:
                 # Get top-k retrieved documents
                 top_k_docs = example_retrieved_docs[:k]
-                # Calculate intersection with gold documents
-                relevant_retrieved = set(top_k_docs) & set(example_gold_docs)
-                # Compute recall
+
+                # Reset matched set for each k (since we're considering different numbers of retrieved docs)
+                gold_docs_matched.clear()
+
+                # Check each retrieved document against all gold documents
+                for retrieved_doc in top_k_docs:
+                    for gold_doc in example_gold_docs:
+                        # If retrieved doc is a substring of gold doc, count it as a match
+                        if retrieved_doc in gold_doc:
+                            gold_docs_matched.add(gold_doc)
+                            # Once a gold doc is matched, we don't need to check other retrieved docs for it
+                            # since we only count each gold doc once
+                            break
+
+                # Compute recall based on number of unique gold documents matched
                 if example_gold_docs:  # Avoid division by zero
-                    example_eval_result[f"Recall@{k}"] = len(relevant_retrieved) / len(set(example_gold_docs))
+                    example_eval_result[f"Recall@{k}"] = len(gold_docs_matched) / len(example_gold_docs)
                 else:
                     example_eval_result[f"Recall@{k}"] = 0.0
-            
+
             # Append example results
             example_eval_results.append(example_eval_result)
-            
+
             # Accumulate pooled results
             for k in k_list:
                 pooled_eval_results[f"Recall@{k}"] += example_eval_result[f"Recall@{k}"]

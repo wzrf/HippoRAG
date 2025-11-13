@@ -660,6 +660,7 @@ class HippoRAG:
         with open(f"{save_directory}/multi_hop/multi_hop_question_{index}.json", 'w', encoding='utf-8') as f:
             json.dump(merged_result, f, ensure_ascii=False, indent=4)
 
+    ## this is for jy bigdata
     def list_all_documents(self, save_directory: str) -> list[str]:
         all_chunks = self.chunk_embedding_store.get_all_id_to_rows()
         print(f"mengyao_debug all_chunks length is {len(all_chunks)}")
@@ -679,6 +680,14 @@ class HippoRAG:
             json.dump(all_chunks, f, ensure_ascii=False, indent=4)
         with open(f"{save_directory}/all_original_text_JY.json", 'w', encoding='utf-8') as f:
             json.dump(all_docs_JY, f, ensure_ascii=False, indent=4)
+
+        try:
+            os.mkdir(f"{save_directory}/input")
+        except Exception as E:
+            ""
+        for idx, chunk in enumerate(all_chunks):
+            with open(f"{save_directory}/input/{idx}.txt", 'w', encoding='utf-8') as f:
+                f.write(chunk)
         return all_docs
 
 
@@ -2400,7 +2409,7 @@ class HippoRAG:
 
         return dpr_sorted_doc_ids, dpr_sorted_doc_scores, dpr_plus_sorted_doc_ids, dpr_plus_sorted_doc_scores, ppr_sorted_doc_ids, ppr_sorted_doc_scores
 
-    def rerank_facts(self, query: str, query_fact_scores: np.ndarray, link_top_k=None) -> Tuple[List[int], List[Tuple], dict]:
+    def rerank_facts(self, query: str, query_fact_scores: np.ndarray, link_top_k=None, rerank=False) -> Tuple[List[int], List[Tuple], dict]:
         """
 
         Args:
@@ -2458,10 +2467,17 @@ class HippoRAG:
             """
             用大模型对facts进行排序；
             """
-            top_k_fact_indices, top_k_facts, reranker_dict = self.rerank_filter(query,
-                                                                                candidate_facts,
-                                                                                candidate_fact_indices,
-                                                                                len_after_rerank=link_top_k)
+            if rerank:
+                top_k_fact_indices, top_k_facts, reranker_dict = self.rerank_filter(query,
+                                                                                    candidate_facts,
+                                                                                    candidate_fact_indices,
+                                                                                    len_after_rerank=link_top_k)
+            else:
+                ## mengyao_debug for fairplay.
+                top_k_fact_indices = candidate_fact_indices
+                top_k_facts = candidate_facts
+                reranker_dict = {}
+
 
             rerank_log = {'facts_before_rerank': candidate_facts, 'facts_after_rerank': top_k_facts}
 

@@ -16,6 +16,20 @@ embedding_model_name = 'text-embedding-v4'  # Embedding model name (NV-Embed, Gr
 aliyun_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
 
+def read_frame(total: int) -> list[str]:
+    with open('/Users/xumengyao/work/QIYUAN/HippoRAG/outputs/aliyun_frame/result_jy.json', 'r', encoding='utf-8') as f:
+        data = json.load(f)
+        docs = [d["text"] for d in data][:total]
+        return docs
+
+
+def read_fanout(total: int) -> list[str]:
+    with open('/Users/xumengyao/work/QIYUAN/HippoRAG/outputs/aliyun_fanout/all_docs.json', 'r', encoding='utf-8') as f:
+        data = json.load(f)
+        docs = [d["text"] for d in data][:total]
+        return docs
+
+
 def read_2wiki_docs(total: int):
     with open('/Users/xumengyao/work/QIYUAN/2wikiQA/data/train.json', 'r', encoding='utf-8') as f:
         data = json.load(f)
@@ -248,6 +262,34 @@ def build_graph_and_raise_questions(questions_total=1, keyword=""):
     hipporag.build_graph_and_raise_question(save_directory=save_dir, questions_total=questions_total)
 
 
+def build_frame(total: int):
+    docs = read_frame(total)
+    print(f"mengyao_debug build_frame docs length is {len(docs)}")
+    save_dir = 'outputs/aliyun_frame'  # Define save directory for HippoRAG objects (each LLM/Embedding model combination will create a new subdirectory)
+    hipporag = HippoRAG(save_dir=save_dir,
+                        llm_model_name=llm_model_name,
+                        llm_base_url=aliyun_url,
+                        embedding_model_name=embedding_model_name,
+                        embedding_base_url=aliyun_url,
+                        llm_model_name_deepthink=llm_model_name_deepthink)
+
+    hipporag.index(docs)
+
+
+def build_fanout(total: int):
+    docs = read_fanout(total)
+    print(f"mengyao_debug build_fanout docs length is {len(docs)}")
+    save_dir = 'outputs/aliyun_fanout'  # Define save directory for HippoRAG objects (each LLM/Embedding model combination will create a new subdirectory)
+    hipporag = HippoRAG(save_dir=save_dir,
+                        llm_model_name=llm_model_name,
+                        llm_base_url=aliyun_url,
+                        embedding_model_name=embedding_model_name,
+                        embedding_base_url=aliyun_url,
+                        llm_model_name_deepthink=llm_model_name_deepthink)
+
+    hipporag.index(docs)
+
+
 def retrieve_2wiki():
     docs, queries, gold_docs, all_answers = read_2wiki_docs(200)
     print(f"mengyao_debug 2wiki docs length is {len(docs)}, gold_docs length is {len(gold_docs)}")
@@ -288,9 +330,9 @@ def retrieve_military():
                         embedding_base_url=aliyun_url,
                         llm_model_name_deepthink=llm_model_name_deepthink)
 
-    # queries, gold_docs = read_own_questions_docs(save_dir)
+    queries, gold_docs = read_own_questions_docs(save_dir)
     hipporag.list_all_documents(save_directory=save_dir)
-    return
+
     (queries_solutions, all_response_message, all_metadata,
      overall_retrieval_result, dpr_overall_retrieval_result, dpr_plus_overall_retrieval_result,
      retrieval_results, dpr_retrieval_results, dpr_plus_retrieval_results) = hipporag.rag_qa(
@@ -304,8 +346,70 @@ def retrieve_military():
                          dpr_plus_retrieval_results=dpr_plus_retrieval_results, queries=queries, save_dir=save_dir)
 
 
-if __name__ == "__main__":
-    # retrieve_military()
+## 横评代码
+def run_dataset(save_dir: str, dataset: str, question_name: str, total_run: int):
+    hipporag = HippoRAG(save_dir=save_dir,
+                        llm_model_name=llm_model_name,
+                        llm_base_url=aliyun_url,
+                        embedding_model_name=embedding_model_name,
+                        embedding_base_url=aliyun_url,
+                        llm_model_name_deepthink=llm_model_name_deepthink)
+    question_file = f"/Users/xumengyao/work/QIYUAN/jybigdata/data/example_data/{dataset}_pages/questions/{question_name}"
+    queries, gold_docs = [], []
+    with open(question_file, 'r', encoding='utf-8') as f:
+        data = json.load(f)[:total_run]
+        for d in data:
+            queries.append(d["question"])
+            gold_docs.append(d["gold_docs"])
+    (queries_solutions, all_response_message, all_metadata,
+     overall_retrieval_result, dpr_overall_retrieval_result, dpr_plus_overall_retrieval_result,
+     retrieval_results, dpr_retrieval_results, dpr_plus_retrieval_results) = hipporag.rag_qa(
+        queries=queries,
+        gold_docs=gold_docs,
+        gold_answers=None,
+        gold_chunk_id="",
+        all_gold_chunk_ids=[])
 
-    # append_own_questions_docs("outputs/aliyun_isereal")
-    build_graph_and_raise_questions(questions_total=10, keyword="isereal")
+    def average_metrics_list(metrics_list):
+        if not metrics_list:
+            return {}
+        from collections import defaultdict
+        sum_metrics = defaultdict(float)
+        count = len(metrics_list)
+
+        # 累加所有字典中对应键的值
+        for metrics in metrics_list:
+            for key, value in metrics.items():
+                sum_metrics[key] += value
+
+        # 计算平均值并保留4位小数
+        avg_metrics = {key: round(value / count, 4) for key, value in sum_metrics.items()}
+
+        return avg_metrics
+
+    retrieval_result_avg = average_metrics_list(retrieval_results)
+    with open(f"./result/{dataset}_{question_name}.json", 'w', encoding='utf-8') as f:
+        json.dump(retrieval_result_avg, f,
+                  indent=4,
+                  ensure_ascii=False,  # 确保中文正常显示
+                  sort_keys=True)  # 按键排序
+
+def run_all_dataset():
+    total_run = 100
+    # run_dataset(save_dir="./outputs/aliyun_2wiki", dataset="2wiki", question_name="questions.json", total_run=total_run)
+    # run_dataset(save_dir="./outputs/aliyun_isereal", dataset="sub_military_refine_prompt_without_concept",
+    #             question_name="questions_format.json", total_run=total_run)
+    run_dataset(save_dir="./outputs/aliyun_isereal", dataset="sub_military_refine_prompt_without_concept",
+                question_name="refined_questions_format.json", total_run=total_run)
+    # run_dataset(save_dir="./outputs/aliyun_isereal", dataset="sub_military_refine_prompt_without_concept",
+    #             question_name="refined_questions_format_split.json", total_run=total_run)
+    # run_dataset(save_dir="./outputs/aliyun_frame", dataset="FRAME", question_name="questions_jy.json",
+    #             total_run=total_run)
+    # run_dataset(save_dir="./outputs/aliyun_fanout", dataset="fanout", question_name="main_questions_with_gold_docs.json",
+    #             total_run=total_run)
+    # run_dataset(save_dir="./outputs/aliyun_fanout", dataset="fanout", question_name="sub_questions_with_gold_docs.json",
+    #             total_run=total_run)
+
+
+if __name__ == "__main__":
+    run_all_dataset()
