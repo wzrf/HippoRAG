@@ -91,7 +91,7 @@ class DSPyFilter:
         messages.append({"role": "user", "content": self.one_input_template.format(question=question, fact_before_filter=fact_before_filter)})
         # call openai
 
-        self.default_gen_kwargs['max_completion_tokens'] = 512
+        self.default_gen_kwargs['max_completion_tokens'] = 2048
 
         print(f"[llm_call] messages is {messages}")
         response = self.llm_infer_fn(

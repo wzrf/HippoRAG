@@ -170,7 +170,7 @@ class BaseConfig:
     
     # Retrieval specific attributes
     linking_top_k: int = field(
-        default=40,
+        default=60,
         metadata={"help": "The number of linked nodes at each retrieval step"}
     )
     retrieval_top_k: int = field(

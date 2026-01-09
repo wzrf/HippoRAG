@@ -278,7 +278,7 @@ class HippoRAG:
 
         ### 查询 triplets
         if len(chunk_keys_to_process) > 0:
-            print(f"mengyao_debug new_openie_rows is {new_openie_rows}")
+            # print(f"mengyao_debug new_openie_rows is {new_openie_rows}")
             new_ner_results_dict, new_triple_results_dict = self.openie.batch_openie(new_openie_rows)
             self.merge_openie_results(all_openie_info, new_openie_rows, new_ner_results_dict, new_triple_results_dict)
 
@@ -1097,10 +1097,10 @@ class HippoRAG:
         """
         询问大模型
         """
-        # queries_solutions, all_response_message, all_metadata = self.qa(queries)
+        queries_solutions, all_response_message, all_metadata = self.qa(queries)
 
         ##todo mengyao_debug we dont have to really do the QA in here
-        queries_solutions, all_response_message, all_metadata = "", "", ""
+        # queries_solutions, all_response_message, all_metadata = "", "", ""
 
         print(f"queries_solutions is {queries_solutions}")
         print(f"all_response_message is {all_response_message}")
@@ -2310,9 +2310,6 @@ class HippoRAG:
 
         dpr_plus_sorted_doc_ids, dpr_plus_sorted_doc_scores = self.dense_passage_retrieval(query_with_fact)
         normalized_dpr_sorted_scores = min_max_normalize(dpr_sorted_doc_scores)
-        # print(f"mengyao_debug dpr_sorted_doc_ids are {dpr_sorted_doc_ids}")
-        # print(f"mengyao_debug dpr_sorted_doc_scores are {dpr_sorted_doc_scores}")
-        # print(f"mengyao_debug normalized_dpr_sorted_scores are {normalized_dpr_sorted_scores}")
 
         for i, dpr_sorted_doc_id in enumerate(dpr_sorted_doc_ids.tolist()):
             passage_node_key = self.passage_node_keys[dpr_sorted_doc_id]
@@ -2409,7 +2406,7 @@ class HippoRAG:
 
         return dpr_sorted_doc_ids, dpr_sorted_doc_scores, dpr_plus_sorted_doc_ids, dpr_plus_sorted_doc_scores, ppr_sorted_doc_ids, ppr_sorted_doc_scores
 
-    def rerank_facts(self, query: str, query_fact_scores: np.ndarray, link_top_k=None, rerank=False) -> Tuple[List[int], List[Tuple], dict]:
+    def rerank_facts(self, query: str, query_fact_scores: np.ndarray, link_top_k=None, rerank=True) -> Tuple[List[int], List[Tuple], dict]:
         """
 
         Args:
@@ -2427,11 +2424,6 @@ class HippoRAG:
         if link_top_k is None:
             link_top_k: int = self.global_config.linking_top_k
 
-        """
-        mengyao_debug query_fact_scores is [0.13013543 0.40800445 1.         0.10302908 0.03689147 0.29024954
-         0.02906869 0.         0.06840486 0.18845899 0.30114114 0.10817363
-         0.73208546 0.00154711 0.76821265], link_top_k is 5
-        """
         print(f"mengyao_debug query_fact_scores is {query_fact_scores}, link_top_k is {link_top_k}")
 
         # Check if there are any facts to rerank

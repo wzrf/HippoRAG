@@ -188,17 +188,30 @@ class CacheOpenAI(BaseLLM):
             # TODO strange version change in openai protocol, but our current vllm version not changed yet
             params['max_tokens'] = params.pop('max_completion_tokens')
 
-        response = self.openai_client.chat.completions.create(**params)
+        if self.llm_name == "qwen3-32b":
+            params["extra_body"] = {"enable_thinking": False}
 
-        response_message = response.choices[0].message.content
-        assert isinstance(response_message, str), "response_message should be a string"
-        
-        metadata = {
-            "prompt_tokens": response.usage.prompt_tokens, 
-            "completion_tokens": response.usage.completion_tokens,
-            "finish_reason": response.choices[0].finish_reason,
-        }
+        try:
+            response = self.openai_client.chat.completions.create(**params)
 
-        return response_message, metadata
+            response_message = response.choices[0].message.content
+            assert isinstance(response_message, str), "response_message should be a string"
+
+            metadata = {
+                "prompt_tokens": response.usage.prompt_tokens,
+                "completion_tokens": response.usage.completion_tokens,
+                "finish_reason": response.choices[0].finish_reason,
+            }
+
+            return response_message, metadata
+        except openai.BadRequestError as e:
+            print(f"OpenAI 错误: {e}")
+            print(f"状态码: {e.status_code}")
+            print(f"错误类型: {e.type}")
+            print(f"错误消息: {e.message}")
+            print(f"完整错误对象: {e.body}")
+        except Exception as E:
+            print(f"infer exception = {E}")
+            exit(0)
 
 

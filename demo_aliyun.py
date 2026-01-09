@@ -10,7 +10,7 @@ from src.hipporag import HippoRAG
 
 logger = logging.getLogger(__name__)
 
-llm_model_name = 'deepseek-v3'  # Any OpenAI model name
+llm_model_name = 'deepseek-v3.2'  # Any OpenAI model name
 llm_model_name_deepthink = 'deepseek-r1'  # Any OpenAI model name
 embedding_model_name = 'text-embedding-v4'  # Embedding model name (NV-Embed, GritLM or Contriever for now)
 aliyun_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -82,11 +82,13 @@ def read_own_questions_docs(workdir: str) -> (list[str], list[list[str]]):
             gold_docs.append(docs)
             questions_format.append({
                 "question": question["question"],
-                "gold_docs": docs
+                "gold_docs": docs,
+                "answer": question["answer"]
             })
             refined_questions_format.append({
                 "question": question["refined_question"],
-                "gold_docs": docs
+                "gold_docs": docs,
+                "answer": question["answer"]
             })
         with open(f"{workdir}/multi_hop/{file_format}", 'w', encoding='utf-8') as f_format:
             json.dump(questions_format, f_format, indent=4, ensure_ascii=False)
@@ -98,6 +100,12 @@ def read_own_questions_docs(workdir: str) -> (list[str], list[list[str]]):
 """
 读取所有multi_hop_questions...合并成一个大的 questions_sum.json，然后返回所有query和gold_docs
 """
+
+def read_military_docs(total: int, filepath = "/Users/xumengyao/work/QIYUAN/DATASET/all_data/military_input.json"):
+    with open(filepath, 'r', encoding='utf-8') as f:
+        docs = json.load(f)[:total]
+    docs = [d["text"] for d in docs]
+    return docs
 
 
 def append_own_questions_docs(workdir: str):
@@ -321,6 +329,20 @@ def retrieve_2wiki():
                          dpr_plus_retrieval_results=dpr_plus_retrieval_results, queries=queries, save_dir=save_dir)
 
 
+def index_military():
+    save_dir = 'outputs/aliyun_military'  # Define save directory for HippoRAG objects (each LLM/Embedding model combination will create a new subdirectory)
+    hipporag = HippoRAG(save_dir=save_dir,
+                        llm_model_name=llm_model_name,
+                        llm_base_url=aliyun_url,
+                        embedding_model_name=embedding_model_name,
+                        embedding_base_url=aliyun_url,
+                        llm_model_name_deepthink=llm_model_name_deepthink)
+
+    docs = read_military_docs(1000)
+    print(f"docs length is {len(docs)}")
+    hipporag.index(docs)
+    return
+
 def retrieve_military():
     save_dir = 'outputs/aliyun_isereal'  # Define save directory for HippoRAG objects (each LLM/Embedding model combination will create a new subdirectory)
     hipporag = HippoRAG(save_dir=save_dir,
@@ -331,6 +353,7 @@ def retrieve_military():
                         llm_model_name_deepthink=llm_model_name_deepthink)
 
     queries, gold_docs = read_own_questions_docs(save_dir)
+    return
     hipporag.list_all_documents(save_directory=save_dir)
 
     (queries_solutions, all_response_message, all_metadata,
@@ -394,13 +417,15 @@ def run_dataset(save_dir: str, dataset: str, question_name: str, total_run: int)
                   ensure_ascii=False,  # 确保中文正常显示
                   sort_keys=True)  # 按键排序
 
+
+## 这个是对所有数据集进行召回评测
 def run_all_dataset():
     total_run = 100
     # run_dataset(save_dir="./outputs/aliyun_2wiki", dataset="2wiki", question_name="questions.json", total_run=total_run)
     # run_dataset(save_dir="./outputs/aliyun_isereal", dataset="sub_military_refine_prompt_without_concept",
     #             question_name="questions_format.json", total_run=total_run)
-    run_dataset(save_dir="./outputs/aliyun_isereal", dataset="sub_military_refine_prompt_without_concept",
-                question_name="refined_questions_format.json", total_run=total_run)
+    # run_dataset(save_dir="./outputs/aliyun_isereal", dataset="sub_military_refine_prompt_without_concept",
+    #             question_name="refined_questions_format.json", total_run=total_run)
     # run_dataset(save_dir="./outputs/aliyun_isereal", dataset="sub_military_refine_prompt_without_concept",
     #             question_name="refined_questions_format_split.json", total_run=total_run)
     # run_dataset(save_dir="./outputs/aliyun_frame", dataset="FRAME", question_name="questions_jy.json",
@@ -411,5 +436,66 @@ def run_all_dataset():
     #             total_run=total_run)
 
 
+def index_musique():
+    question_file = "/Users/xumengyao/work/QIYUAN/DATASET/all_data/musique_input.json"
+    with open(question_file, 'r') as f:
+        questions = json.load(f)
+
+    docs = [q["text"] for q in questions]
+
+    keyword="musique"
+    save_dir = f'outputs/aliyun_{keyword}'  # Define save directory for HippoRAG objects (each LLM/Embedding model combination will create a new subdirectory)
+
+    hipporag = HippoRAG(save_dir=save_dir,
+                        llm_model_name=llm_model_name,
+                        llm_base_url=aliyun_url,
+                        embedding_model_name=embedding_model_name,
+                        embedding_base_url=aliyun_url,
+                        llm_model_name_deepthink=llm_model_name_deepthink)
+
+    hipporag.index(docs)
+
+def index_2wiki():
+    question_file = "/Users/xumengyao/work/QIYUAN/DATASET/all_data/2wiki_input.json"
+    with open(question_file, 'r') as f:
+        questions = json.load(f)
+
+    docs = [q["text"] for q in questions]
+
+    keyword="2wiki"
+    save_dir = f'outputs/aliyun_{keyword}'  # Define save directory for HippoRAG objects (each LLM/Embedding model combination will create a new subdirectory)
+
+    hipporag = HippoRAG(save_dir=save_dir,
+                        llm_model_name=llm_model_name,
+                        llm_base_url=aliyun_url,
+                        embedding_model_name=embedding_model_name,
+                        embedding_base_url=aliyun_url,
+                        llm_model_name_deepthink=llm_model_name_deepthink)
+
+    hipporag.index(docs)
+
+
+def index_locomo():
+    for i in range(0, 10):
+        print(f"running index={i}")
+        text_file = f"/Users/xumengyao/work/QIYUAN/DATASET/locomo/locomo_input_{i}.json"
+        with open(text_file, 'r') as f:
+            texts = json.load(f)
+
+        docs = [q["text"] for q in texts]
+
+        keyword=f"locomo_{i}"
+        save_dir = f'outputs/locomo/aliyun_{keyword}'  # Define save directory for HippoRAG objects (each LLM/Embedding model combination will create a new subdirectory)
+
+        hipporag = HippoRAG(save_dir=save_dir,
+                            llm_model_name=llm_model_name,
+                            llm_base_url=aliyun_url,
+                            embedding_model_name=embedding_model_name,
+                            embedding_base_url=aliyun_url,
+                            llm_model_name_deepthink=llm_model_name_deepthink)
+
+        hipporag.index(docs)
+
+
 if __name__ == "__main__":
-    run_all_dataset()
+    index_locomo()
