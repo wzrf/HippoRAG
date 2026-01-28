@@ -1,5 +1,6 @@
 from copy import deepcopy
 from typing import List, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
 import os
@@ -81,11 +82,16 @@ class OpenAIEmbeddingModel(BaseEmbeddingModel):
 
         return results
 
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import numpy as np
+
     def batch_encode(self, texts: List[str], **kwargs) -> None:
-        if isinstance(texts, str): texts = [texts]
+        if isinstance(texts, str):
+            texts = [texts]
 
         params = deepcopy(self.embedding_config.encode_params)
-        if kwargs: params.update(kwargs)
+        if kwargs:
+            params.update(kwargs)
 
         if "instruction" in kwargs:
             if kwargs["instruction"] != '':
@@ -96,23 +102,44 @@ class OpenAIEmbeddingModel(BaseEmbeddingModel):
 
         batch_size = params.pop("batch_size", 10)
 
-        if len(texts) <= batch_size:
-            ## 对文本进行encode
+        # 准备批次
+        batches = [texts[i:i + batch_size] for i in range(0, len(texts), batch_size)]
+
+        if len(batches) <= 1:
+            # 只有一个批次，直接处理
             results = self.encode(texts)
         else:
+            # 使用线程池并发处理
             pbar = tqdm(total=len(texts), desc="Batch Encoding")
             results = []
-            for i in range(0, len(texts), batch_size):
-                batch = texts[i:i + batch_size]
-                try:
-                    results.append(self.encode(batch))
-                except Exception as E:
-                    print(f"exception! {E}")
-                    import ipdb; ipdb.set_trace()
-                pbar.update(batch_size)
-            pbar.close()
-            results = np.concatenate(results)
 
+            # 方法1: 使用ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=min(len(batches), 8)) as executor:  # 限制最大线程数
+                # 提交所有任务
+                future_to_batch = {
+                    executor.submit(self.encode, batch): idx
+                    for idx, batch in enumerate(batches)
+                }
+
+                # 按提交顺序收集结果
+                ordered_results = [None] * len(batches)
+                for future in as_completed(future_to_batch):
+                    batch_idx = future_to_batch[future]
+                    try:
+                        batch_result = future.result()
+                        ordered_results[batch_idx] = batch_result
+                        pbar.update(len(batches[batch_idx]))
+                    except Exception as E:
+                        print(f"Exception in batch {batch_idx}: {E}")
+                        import ipdb;
+                        ipdb.set_trace()
+                        # 可以选择重新尝试失败的任务或跳过
+
+            # 按原始顺序组合结果
+            results = np.concatenate([res for res in ordered_results if res is not None])
+            pbar.close()
+
+        # 后续处理
         if isinstance(results, torch.Tensor):
             results = results.cpu()
             results = results.numpy()

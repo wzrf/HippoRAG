@@ -191,6 +191,7 @@ llm_model_name_deepthink = 'deepseek-r1'  # Any OpenAI model name
 embedding_model_name = 'text-embedding-v4'  # Embedding model name (NV-Embed, GritLM or Contriever for now)
 aliyun_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 save_dir = ""
+hipporags = []
 
 
 def calc_recal_rate(gold_doc: list, retrieve_docs: list) -> float:
@@ -395,7 +396,8 @@ def run_questions(result_file: str, max_workers: int = 16, all_run=200, question
         """处理单个问题的函数，将被并发执行"""
         # 获取LLM回答
         result = rag_qa_local(
-            hipporag=hipporags[question['conversation_index']],
+            # hipporag=hipporags[question['conversation_index']],  ## this is for locomo
+            hipporag=hipporags[0],
             queries=[question["question"]],
             gold_docs=[question["gold_docs"]]
         )
@@ -464,14 +466,27 @@ def run_questions(result_file: str, max_workers: int = 16, all_run=200, question
     print(f"处理完成！共处理 {len(all_result)} 个问题，结果已保存到 {result_file}")
     return all_result
 
+def test_2wiki():
+    save_dir = f'outputs/aliyun_musique'
+    hipporag_ = HippoRAG(save_dir=save_dir,
+                         llm_model_name=llm_model_name,
+                         llm_base_url=aliyun_url,
+                         embedding_model_name=embedding_model_name,
+                         embedding_base_url=aliyun_url,
+                         llm_model_name_deepthink=llm_model_name_deepthink)
+    hipporags.append(hipporag_)
+    run_questions(
+        result_file=f"outputs/musique/qwen3-32b_result.json",
+        all_run=200,
+        max_workers=16,
+        question_file_name=f"/Users/xumengyao/work/QIYUAN/DATASET/all_data/all_questions/musique_questions.json"
+    )
 
-
-
-if __name__ == "__main__":
+def test_locomo():
     ##fixme: mengyao_debug 建图的LLM和推理时候用的LLM目前必须是一样的；
     dataset = "locomo"
     category = 3
-    hipporags = []
+    global hipporags
     for i in range(0,10):
         save_dir = f'outputs/locomo/aliyun_{dataset}_{i}'
         print(f"initing with {save_dir}")
@@ -489,3 +504,7 @@ if __name__ == "__main__":
         max_workers=16,
         question_file_name=f"/Users/xumengyao/work/QIYUAN/DATASET/all_data/all_questions/locomo_questions_category_{category}.json"
     )
+
+
+if __name__ == "__main__":
+    test_2wiki()

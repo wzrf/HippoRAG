@@ -61,40 +61,33 @@ def read_2wiki_docs(total: int):
 
 
 def read_own_questions_docs(workdir: str) -> (list[str], list[list[str]]):
-    file_to_read_from = "questions_sum.json"
-    file_format = "questions_format.json"
     refined_file_format = "refined_questions_format.json"
-    queries = []
-    gold_docs = []
-    questions_format = []
     refined_questions_format = []
-    with open(f"{workdir}/multi_hop/{file_to_read_from}", 'r', encoding='utf-8') as f:
-        questions = json.load(f)
-        for question in questions:
-            queries.append(question["refined_question"])
-            docs = []
-            chunks_lists = question["chunks_list"]
-            chunk_ids = question["chunk_ids"]
-            for chunk_id in chunk_ids:
-                for chunks_list in chunks_lists:
-                    if chunk_id == chunks_list["hash_id"]:
-                        docs.append(chunks_list["content"])
-            gold_docs.append(docs)
-            questions_format.append({
-                "question": question["question"],
-                "gold_docs": docs,
-                "answer": question["answer"]
-            })
-            refined_questions_format.append({
-                "question": question["refined_question"],
-                "gold_docs": docs,
-                "answer": question["answer"]
-            })
-        with open(f"{workdir}/multi_hop/{file_format}", 'w', encoding='utf-8') as f_format:
-            json.dump(questions_format, f_format, indent=4, ensure_ascii=False)
+    with open(f"{workdir}/multi_hop/{refined_file_format}", 'r', encoding='utf-8') as refined_f_format:
+        current_questions = json.load(refined_f_format)
+        current_questions_q = [q["question"] for q in current_questions]
+
+        for filename in os.listdir(f"{workdir}/multi_hop"):
+            if "multi_hop_question" in filename:
+                with open(f"{workdir}/multi_hop/{filename}", 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    docs = []
+                    chunks_lists = data["chunks_list"]
+                    chunk_ids = data["chunk_ids"]
+                    for chunk_id in chunk_ids:
+                        for chunks_list in chunks_lists:
+                            if chunk_id == chunks_list["hash_id"]:
+                                docs.append(chunks_list["content"])
+                    if data["refined_question"] not in current_questions_q:
+                        current_questions.append({
+                            "question": data["refined_question"],
+                            "gold_docs": docs,
+                            "answer": data["answer"]
+                        })
+        print(f"current_questions length={len(current_questions)}")
+
         with open(f"{workdir}/multi_hop/{refined_file_format}", 'w', encoding='utf-8') as refined_f_format:
-            json.dump(refined_questions_format, refined_f_format, indent=4, ensure_ascii=False)
-        return queries, gold_docs
+            json.dump(current_questions, refined_f_format, indent=4, ensure_ascii=False)
 
 
 """
@@ -108,48 +101,9 @@ def read_military_docs(total: int, filepath = "/Users/xumengyao/work/QIYUAN/DATA
     return docs
 
 
-def append_own_questions_docs(workdir: str):
-    queries = []
-    refined_queries = []
-    gold_docs = []
-    file_to_save = "questions_sum.json"
-    questions_sum = []
-    for filename in os.listdir(f"{workdir}/multi_hop"):
-        if "multi_hop_question" in filename:
-            with open(f"{workdir}/multi_hop/{filename}", 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                docs = []
-                chunks_lists = data["chunks_list"]
-                chunk_ids = data["chunk_ids"]
-                for chunk_id in chunk_ids:
-                    for chunks_list in chunks_lists:
-                        if chunk_id == chunks_list["hash_id"]:
-                            docs.append(chunks_list["content"])
-                gold_docs.append(docs)
-                queries.append(data["question"])
-                if "refined_question" in data:
-                    refined_queries.append(data["refined_question"])
-                questions_sum.append(data)
-
-    with open(f"{workdir}/multi_hop/{file_to_save}", 'r', encoding='utf-8') as f:
-        old_questions = json.load(f)
-        questions_sum.extend(old_questions)
-
-    seen_questions = set()
-    questions_sum = [item for item in questions_sum
-                     if not (item.get('refined_question') in seen_questions or
-                             seen_questions.add(item.get('refined_question')))]
-    print(f"mengyao_debug questions_sum total is {len(questions_sum)}")
-
-    with open(f"{workdir}/multi_hop/{file_to_save}", 'w', encoding='utf-8') as f:
-        json.dump(questions_sum, f,
-                  indent=4,
-                  ensure_ascii=False,  # 确保中文正常显示
-                  sort_keys=True)  # 按键排序
-
 
 def get_all_news_including(keywords: list, repeat_times: int, display_count: int,
-                           print_out_and_exit: bool, save_and_exit: bool) -> list:
+                           print_out_and_exit: bool, save_and_exit: bool, forbid_keywords:list) -> list:
     all_passages = []
     parent_folder = "/Users/xumengyao/work/QIYUAN/military_pages/"
     items = os.listdir(parent_folder)
@@ -166,12 +120,16 @@ def get_all_news_including(keywords: list, repeat_times: int, display_count: int
                         if count >= repeat_times:
                             total_keywords_satisfy_count += 1
                     if total_keywords_satisfy_count == len(keywords) and len(data["text"]) < 8192:
-                        all_passages.append(data["text"])
+                        include = True
+                        for forbid_keyword in forbid_keywords:
+                            if forbid_keyword in data["text"]:
+                                include = False
+                        if include:
+                            all_passages.append(data["text"])
 
     if print_out_and_exit:
-        all_passages = all_passages[:display_count]
         for passages in all_passages:
-            print(f"文档：{passages}")
+            print(f"文档：{passages[:100]}")
         exit(0)
 
     if save_and_exit:
@@ -244,9 +202,9 @@ def save_result_to_local(save_dir: str, queries: list[str], retrieval_results, d
     compare_retrival_results(retrieval_results, dpr_retrieval_results, queries)
 
 
-def build_graph_and_raise_questions(questions_total=1, keyword=""):
-    docs = get_all_news_including(["中东"], 1, 1,
-                                  False, False)
+def build_graph_and_raise_questions(questions_total=2, keyword=""):
+    docs = get_all_news_including([""], 1, 1,
+                                  False, False, forbid_keywords=["习近平", "中国", "台湾", "我国", "间谍", "国家安全机关"])
 
     print(f"总共文档数量是 {len(docs)}")
 
@@ -265,7 +223,9 @@ def build_graph_and_raise_questions(questions_total=1, keyword=""):
     """
     把所有当前库里面的文档都dump到本地；(用于elastic search检索)
     """
-    inserted = insert_documents_with_check(index_name="military", documents=all_docs)
+    print(f"总共文档数量是 {len(all_docs)}")
+
+    # inserted = insert_documents_with_check(index_name="military", documents=all_docs)
 
     hipporag.build_graph_and_raise_question(save_directory=save_dir, questions_total=questions_total)
 
@@ -498,4 +458,5 @@ def index_locomo():
 
 
 if __name__ == "__main__":
-    index_locomo()
+    build_graph_and_raise_questions(keyword="isereal", questions_total=10)
+    read_own_questions_docs("outputs/aliyun_isereal")

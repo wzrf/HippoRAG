@@ -33,7 +33,10 @@ def _extract_ner_from_response(real_response):
     if match is None:
         # If pattern doesn't match, return an empty list
         return []
-    return eval(match.group())["named_entities"]
+    result = eval(match.group())["named_entities"]
+    if len(result) > 0 and type(result[0]) is dict:
+        result = [r.get("name", r.get("entity", "")) for r in result]
+    return result
 
 
 class OpenIE:
@@ -67,7 +70,7 @@ class OpenIE:
             # print(f"mengyao_debug extracted_entities is {extracted_entities} unique_entities is {unique_entities}")
 
         except Exception as e:
-            print(f"mengyao_debug failed to extract entities, exception is {e}")
+            print(f"mengyao_debug failed to extract entities, exception is {e}，raw_response={raw_response}")
             # For any other unexpected exceptions, log them and return with the error message
             logger.warning(e)
             metadata.update({'error': str(e)})

@@ -578,10 +578,131 @@ class HippoRAG:
         else:
             return retrieval_results
 
-    def raise_question(self, multi_hop_result: dict, save_directory: str, index: int):
+    def multi_hop_jump(self, new_graph):
+        node_without_usable_edges = set()
+        chunks_found = set()
+        chunks_list = []
+        nodes_hopped = []  ## (a, b)
+        edges_index_hopped = []  ## just index
+        edges_hopped = []
+        valid_attributes = {
+            "attributes": []
+        }
+        facts_list = []
+        total_hop = 15
+        total_chunks = 4
+        """
+        为了防止一个节点作为起跳点太多次；如果他作为起跳点4次以上，则不让他再跳；
+        """
+        total_jump_allowed_from_a_vertex = 4
+        vertex_as_start_of_jump = {}
+        ## 开始multihop
+        ## 假设是5跳：
+        vertex_ids = [v.index for v in new_graph.vs]  # 获取所有顶点ID
+        initial_vertex = random.choice(vertex_ids)
+        nodes_hopped.append(initial_vertex)
+
+        def get_next_hop(current: list, node_without_usable_edges: set) -> int:
+            for index in reversed(range(len(current))):
+                if current[index] not in node_without_usable_edges:
+                    return current[index]
+            return -1
+
+        def not_fully_contains(current: list, to_be_chosen: list) -> bool:
+            for entities in to_be_chosen:
+                if entities not in current:
+                    return True
+            return False
+
+        while len(chunks_found) < total_chunks and len(edges_hopped) < total_hop:
+            random_vertex = get_next_hop(nodes_hopped, node_without_usable_edges)
+            if random_vertex == -1:
+                print(f"跳不下去了，结束！")
+                return False
+            incident_edges = new_graph.incident(random_vertex, mode="all")
+            # print(f"随机选择的顶点: {random_vertex}, edges {incident_edges}")
+            if incident_edges:
+                """
+                随机选择一条边
+                """
+                random_edge = random.choice(incident_edges)
+                """
+                如果这条边存在了就不要再走了；
+
+                我们先不允许成环
+                """
+                if random_edge in edges_index_hopped:
+                    if not_fully_contains(edges_index_hopped, incident_edges):
+                        print(f"这条边已经走过了，重试")
+                        continue
+                    else:
+                        ## 这个点的所有边都已经被选择过了，这个点已经不能再跳了必须回头了
+                        node_without_usable_edges.add(random_vertex)
+                        print(f"没有可跳的方向了，回头")
+                        continue
+
+                edge_info = new_graph.es[random_edge]
+                source_vertex = edge_info.source
+                target_vertex = edge_info.target
+
+                if target_vertex in nodes_hopped:
+                    """
+                    如果发现成环了，也不可以；把这条边列为已经跳过的，不允许再跳；
+                    """
+                    edges_index_hopped.append(random_edge)
+                    if not_fully_contains(edges_index_hopped, incident_edges):
+                        # print(f"【成环】这条边已经走过了，重试")
+                        continue
+                    else:
+                        ## 这个点的所有边都已经被选择过了，这个点已经不能再跳了必须回头了
+                        node_without_usable_edges.add(random_vertex)
+                        # print(f"【成环】没有可跳的方向了，回头")
+                        continue
+
+                """
+                可以跳了
+                add vertex and edges to the nodes and edges hopped list
+                """
+                vertex_as_start_of_jump[random_vertex] = vertex_as_start_of_jump.get(random_vertex, 0) + 1
+                if vertex_as_start_of_jump[random_vertex] >= total_jump_allowed_from_a_vertex:
+                    node_without_usable_edges.add(random_vertex)
+                if source_vertex == random_vertex:
+                    nodes_hopped.append(target_vertex)
+                else:
+                    nodes_hopped.append(source_vertex)
+                edges_hopped.append((source_vertex, target_vertex))
+                edges_index_hopped.append(random_edge)
+
+                valid_attributes["attributes"].append(new_graph.es[random_edge]["attributes"])
+
+                source_name = new_graph.vs[source_vertex]["content"]
+                target_name = new_graph.vs[target_vertex]["content"]
+
+                chunks_found.add(edge_info.attributes()["chunks"][0])
+                chunk = self.chunk_embedding_store.get_row(edge_info.attributes()["chunks"][0])
+                if chunk not in chunks_list:
+                    chunks_list.append(chunk)
+                facts_list.append([source_name, edge_info.attributes()["attributes"][0], target_name])
+            else:
+                print(f"已经走到尽头了")
+                break
+
+        result = {
+            "edges_hopped": edges_hopped,
+            "nodes_hopped": nodes_hopped,
+            "chunks": list(chunks_found),
+            "chunks_list": chunks_list,
+            "facts_list": facts_list,
+        }
+        return result
+
+    def raise_question(self, save_directory: str, index: int, new_graph):
         """
         step 1: let the LLM extract all facts.
         """
+        multi_hop_result = self.multi_hop_jump(new_graph=new_graph)
+        while multi_hop_result is False:
+            multi_hop_result = self.multi_hop_jump(new_graph=new_graph)
         print(f"mengyao_debug raise_question {index}")
         chunks_list = multi_hop_result["chunks_list"]
         fact_extract_prompt = self.prompt_template_manager.render(name='fact_extract', passage=chunks_list)
@@ -613,16 +734,8 @@ class HippoRAG:
         question_generated_json["keep"] = True
         question_generated_json["finetuned"] = False
         question_generated_json["optimization"] = "无需优化"
-        question_rate_prompt = self.prompt_template_manager.render(name='question_rate', passage=json.dumps(question_generated_json))
-        raw_response, metadata, cache_hit = self.llm_model.infer(question_rate_prompt)
-        if metadata['finish_reason'] == 'length':
-            question_rate = fix_broken_generated_json(raw_response)
-        else:
-            question_rate = raw_response
-        question_rate = question_rate.replace("```json", "").replace("```", "").strip()
-        question_rate_json = json.loads(question_rate)
-        print(f"question_rate_json is {question_rate_json}")
-        merged_result = {**question_rate_json, **question_generated_json}
+
+        merged_result = question_generated_json
         merged_result["chunks_list"] = chunks_list
 
         print(f"mengyao_debug merged_result is {merged_result}")
@@ -666,15 +779,17 @@ class HippoRAG:
         print(f"mengyao_debug all_chunks length is {len(all_chunks)}")
         all_docs = []
         all_docs_JY = []
+        index = 0
         for key, value in all_chunks.items():
             all_docs.append(value["content"])
             all_docs_JY.append({
-                "id": 1,
+                "id": index,
                 "text": value["content"],
                 "metadata": {
                     "lang": "zh-CN"
                 }
             })
+            index+=1
 
         with open(f"{save_directory}/all_original_text.json", 'w', encoding='utf-8') as f:
             json.dump(all_chunks, f, ensure_ascii=False, indent=4)
@@ -729,7 +844,6 @@ class HippoRAG:
         new_graph = self.graph.copy()
 
         vertices = new_graph.vs
-        print("所有顶点:", vertices["name"])
 
         # 3. 遍历所有边，删除所有连接到chunk上面的边。
         edges_to_remove = []
@@ -754,8 +868,9 @@ class HippoRAG:
 
         # 4. 删除标记的边（从后往前删除以避免索引问题）
         edges_to_remove.sort(reverse=True)
-        for edge_index in edges_to_remove:
-            new_graph.delete_edges(edge_index)
+        new_graph.delete_edges(edges_to_remove)
+        # for edge_index in edges_to_remove:
+        #     new_graph.delete_edges(edge_index)
             # print(f"已删除边索引 {edge_index}")
 
         # 再删除chunk点，防止图太乱：
@@ -770,12 +885,15 @@ class HippoRAG:
         if vertices_to_remove:
             # 按索引降序排序，这样从后往前删除不会影响前面的索引
             vertices_to_remove.sort(reverse=True)
-
-            for vertex_index in vertices_to_remove:
-                new_graph.delete_vertices(vertex_index)
-                # print(f"已删除顶点索引 {vertex_index}")
+            new_graph.delete_vertices(vertices_to_remove)
+            # for vertex_index in vertices_to_remove:
+            #     new_graph.delete_vertices(vertex_index)
+            #     # print(f"已删除顶点索引 {vertex_index}")
         else:
             print("\n没有找到标签包含'chunk'的顶点")
+
+        new_graph.save("/tmp/military.graphml", format="graphml")
+        # return
 
         passages_summary = ""
         all_fact_set = set()
@@ -802,27 +920,15 @@ class HippoRAG:
         print(f"""passages_summary is {all_fact_set}""")
         print(f"""top_10 is {top_10}""")
 
-        all_vertices_names = []
-        for name in new_graph.vs["name"]:
-            if "chunk" in name:
-                all_vertices_names.append(name)
-            else:
-                all_vertices_names.append(self.entity_embedding_store.get_all_id_to_rows()[name]["content"])
+        # all_vertices_names = []
+        # for name in new_graph.vs["name"]:
+        #     if "chunk" in name:
+        #         all_vertices_names.append(name)
+        #     else:
+        #         all_vertices_names.append(self.entity_embedding_store.get_all_id_to_rows()[name]["content"])
         ig.config["plotting.backend"] = "matplotlib"
         import matplotlib.pyplot as plt
         plt.rcParams['font.sans-serif'] = ['SimHei']  # 用来正常显示中文标签
-
-        def not_fully_contains(current: list, to_be_chosen: list) -> bool:
-            for entities in to_be_chosen:
-                if entities not in current:
-                    return True
-            return False
-
-        def get_next_hop(current: list, node_without_usable_edges: set) -> int:
-            for index in reversed(range(len(current))):
-                if current[index] not in node_without_usable_edges:
-                    return current[index]
-            return -1
 
         def draw_graph(new_nodes: dict, valid_edges: list, valid_attributes: dict, index: int):
             print(f"draw_graph new_nodes is {new_nodes}")
@@ -879,135 +985,25 @@ class HippoRAG:
             return max(indices) if indices else 0
 
         def generate_multihop(total: int) -> bool:
-            node_without_usable_edges = set()
-            chunks_found = set()
-            chunks_list = []
-            nodes_hopped = []  ## (a, b)
-            edges_index_hopped = []  ## just index
-            edges_hopped = []
-            valid_attributes = {
-                "attributes": []
-            }
-            facts_list = []
-            total_hop = 15
-            total_chunks = 10
-            """
-            为了防止一个节点作为起跳点太多次；如果他作为起跳点4次以上，则不让他再跳；
-            """
-            total_jump_allowed_from_a_vertex = 4
-            vertex_as_start_of_jump = {}
-            ## 开始multihop
-            ## 假设是5跳：
-            vertex_ids = [v.index for v in new_graph.vs]  # 获取所有顶点ID
-            initial_vertex = random.choice(vertex_ids)
-            nodes_hopped.append(initial_vertex)
-            while len(chunks_found) < total_chunks or len(edges_hopped) < total_hop:
-                random_vertex = get_next_hop(nodes_hopped, node_without_usable_edges)
-                if random_vertex == -1:
-                    print(f"跳不下去了，结束！")
-                    return False
-                incident_edges = new_graph.incident(random_vertex, mode="all")
-                print(f"随机选择的顶点: {random_vertex}, edges {incident_edges}")
-                if incident_edges:
-                    """
-                    随机选择一条边
-                    """
-                    random_edge = random.choice(incident_edges)
-                    """
-                    如果这条边存在了就不要再走了；
-                    
-                    我们先不允许成环
-                    """
-                    if random_edge in edges_index_hopped:
-                        if not_fully_contains(edges_index_hopped, incident_edges):
-                            print(f"这条边已经走过了，重试")
-                            continue
-                        else:
-                            ## 这个点的所有边都已经被选择过了，这个点已经不能再跳了必须回头了
-                            node_without_usable_edges.add(random_vertex)
-                            print(f"没有可跳的方向了，回头")
-                            continue
 
-                    edge_info = new_graph.es[random_edge]
-                    source_vertex = edge_info.source
-                    target_vertex = edge_info.target
 
-                    if target_vertex in nodes_hopped:
-                        """
-                        如果发现成环了，也不可以；把这条边列为已经跳过的，不允许再跳；
-                        """
-                        edges_index_hopped.append(random_edge)
-                        if not_fully_contains(edges_index_hopped, incident_edges):
-                            print(f"【成环】这条边已经走过了，重试")
-                            continue
-                        else:
-                            ## 这个点的所有边都已经被选择过了，这个点已经不能再跳了必须回头了
-                            node_without_usable_edges.add(random_vertex)
-                            print(f"【成环】没有可跳的方向了，回头")
-                            continue
-
-                    """
-                    可以跳了
-                    add vertex and edges to the nodes and edges hopped list
-                    """
-                    vertex_as_start_of_jump[random_vertex] = vertex_as_start_of_jump.get(random_vertex, 0) + 1
-                    if vertex_as_start_of_jump[random_vertex] >= total_jump_allowed_from_a_vertex:
-                        node_without_usable_edges.add(random_vertex)
-                    if source_vertex == random_vertex:
-                        nodes_hopped.append(target_vertex)
-                    else:
-                        nodes_hopped.append(source_vertex)
-                    edges_hopped.append((source_vertex, target_vertex))
-                    edges_index_hopped.append(random_edge)
-
-                    valid_attributes["attributes"].append(new_graph.es[random_edge]["attributes"])
-
-                    source_name = new_graph.vs[source_vertex]["content"]
-                    target_name = new_graph.vs[target_vertex]["content"]
-
-                    print(f"随机选择的边: {random_edge}, "
-                          f"""{source_name} """
-                          f"""{edge_info.attributes()["attributes"][0]}"""
-                          f"""{target_name} """)
-                    chunks_found.add(edge_info.attributes()["chunks"][0])
-                    chunk = self.chunk_embedding_store.get_row(edge_info.attributes()["chunks"][0])
-                    if chunk not in chunks_list:
-                        chunks_list.append(chunk)
-                    facts_list.append([source_name, edge_info.attributes()["attributes"][0], target_name])
-                    # f"""chunk is {self.chunk_embedding_store.get_row(edge_info["chunks"][0]["hash_id"])}""")
-                    # print(f"对应的文章是 {}")
-                else:
-                    print(f"已经走到尽头了")
-                    break
-
-            result = {
-                "edges_hopped": edges_hopped,
-                "nodes_hopped": nodes_hopped,
-                "chunks": list(chunks_found),
-                "chunks_list": chunks_list,
-                "facts_list": facts_list,
-            }
-
-            new_nodes = {
-                "name": [new_graph.vs[node]["hash_id"] for node in nodes_hopped],
-                "content": [new_graph.vs[node]["content"] for node in nodes_hopped],
-            }
-            valid_edges = [(new_graph.vs[source_vertex]["hash_id"], new_graph.vs[target_vertex]["hash_id"])
-                           for (source_vertex, target_vertex) in edges_hopped]
-
-            print(f"最后选出的结果是 {result} new_nodes is {new_nodes}")
-            try:
-                os.makedirs(f"{save_directory}/multi_hop")
-            except Exception as E:
-                print("already exist.")
+            # new_nodes = {
+            #     "name": [new_graph.vs[node]["hash_id"] for node in nodes_hopped],
+            #     "content": [new_graph.vs[node]["content"] for node in nodes_hopped],
+            # }
+            # valid_edges = [(new_graph.vs[source_vertex]["hash_id"], new_graph.vs[target_vertex]["hash_id"])
+            #                for (source_vertex, target_vertex) in edges_hopped]
+            #
+            # print(f"最后选出的结果是 {result} new_nodes is {new_nodes}")
+            os.makedirs(f"{save_directory}/multi_hop", exist_ok=True)
             index_current = find_max_index_glob(f"{save_directory}/multi_hop") + 1
             all_threads = []
             for index_save in range(index_current, index_current+total):
-                print(f"save to index {index_save}")
-                try:
-                    draw_graph(new_nodes, valid_edges, valid_attributes, index_save)
-                except Exception as E:
-                    print(f"fail to draw a picture, reason is {E}")
+                # print(f"save to index {index_save}")
+                # try:
+                #     draw_graph(new_nodes, valid_edges, valid_attributes, index_save)
+                # except Exception as E:
+                #     print(f"fail to draw a picture, reason is {E}")
                 # with open(f"{save_directory}/multi_hop/multi_hop_{index_save}.json", 'w', encoding='utf-8') as f:
                 #     json.dump(result, f, ensure_ascii=False, indent=4)
 
@@ -1016,7 +1012,7 @@ class HippoRAG:
 
                 thread = threading.Thread(
                     target=self.raise_question,
-                    args=(result, save_directory, index_save),
+                    args=(save_directory, index_save, new_graph),
                     daemon=True  # 设置为守护线程，主程序退出时自动结束
                 )
                 thread.start()
@@ -1029,8 +1025,7 @@ class HippoRAG:
             return True
 
 
-        while generate_multihop(questions_total) is False:
-            print("retrying generate_multihop")
+        generate_multihop(questions_total)
         print("finish generate!")
 
     def rag_qa(self,
