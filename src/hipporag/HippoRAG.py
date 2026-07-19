@@ -514,7 +514,7 @@ class HippoRAG:
                     top_k_facts=top_k_facts,
                     top_k_fact_indices=top_k_fact_indices,
                     passage_node_weight=self.global_config.passage_node_weight,
-                    all_gold_docs=gold_docs[q_idx])
+                    all_gold_docs=[])
 
             print(f"num_to_retrieve top is {num_to_retrieve}")
             top_k_docs_hash = [self.passage_node_keys[idx] for idx in sorted_doc_ids[:num_to_retrieve]]
@@ -746,28 +746,27 @@ class HippoRAG:
             if chunk["hash_id"] in chunk_ids:
                 gold_docs.append(chunk["content"])
         print(f"gold docs is {gold_docs}")
-        es_search_result = search_and_analyze_gold_docs(query_str=query, gold_docs=gold_docs,
-                                                        index_name="military")
-        inital_rank = [doc["rank"] for doc in es_search_result["gold_docs_analysis"]]
         question_refined = query
-
-        ## todo fixme: mengyao_debug just try once
-        if len(inital_rank) > 0:
-            print(f"""ES result for initial question is {inital_rank}""")
-            # return
-
-            question_refined = self.refine_question(es_search_result)
-            es_search_result = search_and_analyze_gold_docs(query_str=question_refined, gold_docs=gold_docs,
-                                                            index_name="military")
-            inital_rank = [doc["rank"] for doc in es_search_result["gold_docs_analysis"]]
-            print(f"question_refined is {question_refined}, refined rank is {inital_rank}")
-
-        print(f"hmm finally perfect. question_refined is {question_refined}, refined rank is {inital_rank}")
-        es_search_result_final = search_and_analyze_gold_docs(query_str=question_refined, gold_docs=gold_docs,
-                                                        index_name="military", rank_thresh=200)
+        # es_search_result = search_and_analyze_gold_docs(query_str=query, gold_docs=gold_docs,
+        #                                                 index_name="military")
+        # inital_rank = [doc["rank"] for doc in es_search_result["gold_docs_analysis"]]
+        # ## todo fixme: mengyao_debug just try once
+        # if len(inital_rank) > 0:
+        #     print(f"""ES result for initial question is {inital_rank}""")
+        #     # return
+        #
+        #     question_refined = self.refine_question(es_search_result)
+        #     es_search_result = search_and_analyze_gold_docs(query_str=question_refined, gold_docs=gold_docs,
+        #                                                     index_name="military")
+        #     inital_rank = [doc["rank"] for doc in es_search_result["gold_docs_analysis"]]
+        #     print(f"question_refined is {question_refined}, refined rank is {inital_rank}")
+        #
+        # print(f"hmm finally perfect. question_refined is {question_refined}, refined rank is {inital_rank}")
+        # es_search_result_final = search_and_analyze_gold_docs(query_str=question_refined, gold_docs=gold_docs,
+        #                                                 index_name="military", rank_thresh=200)
 
         merged_result["refined_question"] = question_refined
-        merged_result["es_search_result_final"] = es_search_result_final
+        # merged_result["es_search_result_final"] = es_search_result_final
         merged_result["total_fact_list"] = total_fact_list
         print(f"mengyao_debug merged_result is {merged_result}")
         with open(f"{save_directory}/multi_hop/multi_hop_question_{index}.json", 'w', encoding='utf-8') as f:

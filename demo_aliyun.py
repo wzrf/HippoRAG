@@ -396,6 +396,23 @@ def run_all_dataset():
     #             total_run=total_run)
 
 
+def retrieve_musique(query: str, num_to_retrieve: int) -> list[str]:
+    keyword = "musique"
+    save_dir = f'outputs/aliyun_{keyword}'
+    hipporag = HippoRAG(save_dir=save_dir,
+                        llm_model_name=llm_model_name,
+                        llm_base_url=aliyun_url,
+                        embedding_model_name=embedding_model_name,
+                        embedding_base_url=aliyun_url,
+                        llm_model_name_deepthink=llm_model_name_deepthink)
+    result = hipporag.retrieve(
+        queries=[query],
+        num_to_retrieve=num_to_retrieve,
+        gold_docs=None,
+        gold_chunk_id="",
+        all_gold_chunk_ids=[])
+    return result[0].docs
+
 def index_musique():
     question_file = "/Users/xumengyao/work/QIYUAN/DATASET/all_data/musique_input.json"
     with open(question_file, 'r') as f:
@@ -458,5 +475,6 @@ def index_locomo():
 
 
 if __name__ == "__main__":
-    build_graph_and_raise_questions(keyword="isereal", questions_total=10)
-    read_own_questions_docs("outputs/aliyun_isereal")
+    # build_graph_and_raise_questions(keyword="isereal", questions_total=37)
+    # read_own_questions_docs("outputs/aliyun_isereal")
+    index_locomo()
